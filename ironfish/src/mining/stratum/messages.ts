@@ -16,6 +16,7 @@ export type MiningSubscribeMessage = {
 export type MiningSubmitMessage = {
   miningRequestId: number
   randomness: string
+  graffiti?: string
 }
 
 export type MiningSubscribedMessage = {
@@ -32,6 +33,11 @@ export type MiningWaitForWorkMessage = undefined
 export type MiningNotifyMessage = {
   miningRequestId: number
   header: string
+}
+
+export type MiningSubmitedMessage = {
+  result: boolean
+  error: string
 }
 
 export const StratumMessageSchema: yup.ObjectSchema<StratumMessage> = yup
@@ -76,5 +82,6 @@ export const MiningSubmitSchema: yup.ObjectSchema<MiningSubmitMessage> = yup
   .object({
     miningRequestId: yup.number().required(),
     randomness: yup.string().required(),
+    graffiti: yup.string().notRequired(),
   })
   .required()
