@@ -4,11 +4,13 @@
 import { blake3 } from '@napi-rs/blake-hash'
 import LeastRecentlyUsed from 'blru'
 import { Assert } from '../assert'
+import { GRAFFITI_SIZE } from '../consensus/consensus'
 import { Config } from '../fileStores/config'
 import { createRootLogger, Logger } from '../logger'
 import { Target } from '../primitives/target'
 import { IronfishIpcClient } from '../rpc/clients'
 import { SerializedBlockTemplate } from '../serde/BlockTemplateSerde'
+import { GraffitiUtils, StringUtils } from '../utils'
 import { BigIntUtils } from '../utils/bigint'
 import { ErrorUtils } from '../utils/error'
 import { FileUtils } from '../utils/file'
@@ -173,6 +175,7 @@ export class MiningPool {
     client: StratumServerClient,
     miningRequestId: number,
     randomness: string,
+    graffiti?: string,
   ): Promise<void> {
     Assert.isNotNull(client.publicAddress)
     Assert.isNotNull(client.graffiti)
@@ -180,6 +183,7 @@ export class MiningPool {
       this.logger.debug(
         `Client ${client.id} submitted work for stale mining request: ${miningRequestId}`,
       )
+      this.stratum.submitReply(client, false, "stale-work")
       return
     }
 
@@ -189,6 +193,7 @@ export class MiningPool {
       this.logger.warn(
         `Client ${client.id} work for invalid mining request: ${miningRequestId}`,
       )
+      this.stratum.submitReply(client, false, "invalid-work")
       return
     }
 
@@ -201,12 +206,21 @@ export class MiningPool {
       this.logger.warn(
         `Client ${client.id} submitted a duplicate mining request: ${miningRequestId}, ${randomness}`,
       )
+      this.stratum.submitReply(client, false, "duplicate-share")
       return
     }
 
     this.addWorkSubmission(client.id, randomness)
 
-    blockTemplate.header.graffiti = client.graffiti.toString('hex')
+    let graffitiBytes = client.graffiti
+    this.logger.debug(`-----graffiti is ${graffiti}`)
+    if (graffiti) {
+      Assert.isTrue(StringUtils.getByteLength(graffiti) <= GRAFFITI_SIZE)
+      graffitiBytes = GraffitiUtils.fromString(graffiti)
+    }
+    this.logger.debug(`graffiti is ${graffitiBytes.toString('hex')}`)
+
+    blockTemplate.header.graffiti = graffitiBytes.toString('hex')
     blockTemplate.header.randomness = randomness
 
     let headerBytes
@@ -214,6 +228,7 @@ export class MiningPool {
       headerBytes = mineableHeaderString(blockTemplate.header)
     } catch (error) {
       this.logger.debug(`${client.id} sent malformed work. No longer sending work.`)
+      this.stratum.submitReply(client, false, "malformed-work")
       this.stratum.addBadClient(client)
       return
     }
@@ -233,14 +248,23 @@ export class MiningPool {
           )} submitted successfully! ${FileUtils.formatHashRate(hashRate)}/s`,
         )
         this.discord?.poolSubmittedBlock(hashedHeader, hashRate, this.stratum.getClientCount())
+
+      this.stratum.submitReply(client, true, "Submitted to node accepted")
       } else {
         this.logger.info(`Block was rejected: ${result.content.reason}`)
+        this.stratum.submitReply(client, false, "Submitted to node rejected")
       }
     }
 
+    this.logger.debug(`share hash result: ${hashedHeader.toString('hex',)}`)
+
     if (hashedHeader.compare(this.target) !== 1) {
       this.logger.debug('Valid pool share submitted')
+      this.stratum.submitReply(client, true, "Pool share submitted")
       await this.shares.submitShare(client.publicAddress)
+    } else {
+      this.logger.debug('Invalid pool share submitted')
+      this.stratum.submitReply(client, false, "Pool share high hash")
     }
   }
 
@@ -319,12 +343,16 @@ export class MiningPool {
     // In this case, it is detrimental to send out new work as it will needlessly reset miner's search
     // space, resulting in duplicated work.
     const existingTarget = BigIntUtils.fromBytes(Buffer.from(latestBlock.header.target, 'hex'))
-    if (newTarget.asBigInt() === existingTarget) {
+    if (newTarget.asBigInt() === existingTarget && newTime.getTime() - latestBlock.header.timestamp < 30000) {
       this.logger.debug(
-        `New target ${newTarget.asBigInt()} is the same as the existing target, no need to send out new work.`,
+        `Existing target ${BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')}, no need to send out new work.`,
       )
       return
     }
+
+    this.logger.debug(
+      `New target ${BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')} need to send out new work.`,
+    )
 
     latestBlock.header.target = BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')
     latestBlock.header.timestamp = newTime.getTime()

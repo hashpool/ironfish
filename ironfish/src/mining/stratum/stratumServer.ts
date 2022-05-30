@@ -22,6 +22,7 @@ import {
   MiningSubscribeSchema,
   StratumMessage,
   StratumMessageSchema,
+  MiningSubmitedMessage,
 } from './messages'
 
 export class StratumServerClient {
@@ -218,8 +219,9 @@ export class StratumServer {
 
           const submittedRequestId = body.result.miningRequestId
           const submittedRandomness = body.result.randomness
+          const submittedGraffiti = body.result.graffiti
 
-          void this.pool.submitWork(client, submittedRequestId, submittedRandomness)
+          void this.pool.submitWork(client, submittedRequestId, submittedRandomness, submittedGraffiti)
 
           break
         }
@@ -280,6 +282,7 @@ export class StratumServer {
       client.socket.write(serialized)
     }
   }
+
   private send(
     client: StratumServerClient,
     method: 'mining.notify',
@@ -295,6 +298,11 @@ export class StratumServer {
     method: 'mining.subscribed',
     body: MiningSubscribedMessage,
   ): void
+  private send(
+    client: StratumServerClient,
+    method: 'mining.submitted',
+    body: MiningSubmitedMessage,
+  ): void
   private send(client: StratumServerClient, method: 'mining.wait_for_work'): void
   private send(client: StratumServerClient, method: string, body?: unknown): void {
     const message: StratumMessage = {
@@ -305,5 +313,10 @@ export class StratumServer {
 
     const serialized = JSON.stringify(message) + '\n'
     client.socket.write(serialized)
+  }
+  
+
+  submitReply (client: StratumServerClient, result: boolean, msg: string): void {
+    this.send(client, 'mining.submitted', {result: result, error: msg})
   }
 }
