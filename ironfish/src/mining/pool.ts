@@ -254,7 +254,6 @@ export class MiningPool {
           )} submitted successfully! ${FileUtils.formatHashRate(hashRate)}/s`,
         )
         this.discord?.poolSubmittedBlock(hashedHeader, hashRate, this.stratum.getClientCount())
-
         this.stratum.submitReply(client, true, "Submitted to node accepted")
       } else {
         this.logger.info(`Block was rejected: ${result.content.reason}`)
