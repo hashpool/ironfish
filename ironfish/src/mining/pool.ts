@@ -268,7 +268,8 @@ export class MiningPool {
       this.stratum.submitReply(client, true, "Pool share submitted")
       await this.shares.submitShare(client.publicAddress)
     } else {
-      this.logger.debug('Invalid pool share submitted')
+      this.logger.error('High hash pool share submitted')
+      // this.logger.debug(`headerBytes: ${headerBytes.toString('hex')}`)
       this.stratum.submitReply(client, false, "Pool share high hash")
     }
   }
@@ -318,6 +319,7 @@ export class MiningPool {
   private async processNewBlocks() {
     for await (const payload of this.rpc.blockTemplateStream().contentStream(true)) {
       Assert.isNotUndefined(payload.previousBlockInfo)
+      this.logger.info(`New block have got. height: ${payload.header.sequence}`)
       this.restartCalculateTargetInterval()
 
       const currentHeadTarget = new Target(Buffer.from(payload.previousBlockInfo.target, 'hex'))
@@ -359,9 +361,11 @@ export class MiningPool {
       `New target ${BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')} need to send out new work.`,
     )
 
-    latestBlock.header.target = BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')
-    latestBlock.header.timestamp = newTime.getTime()
-    this.distributeNewBlock(latestBlock)
+    const blockTemplate = Object.assign({}, latestBlock)
+    blockTemplate.header = Object.assign({}, latestBlock.header)
+    blockTemplate.header.target = BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')
+    blockTemplate.header.timestamp = newTime.getTime()
+    this.distributeNewBlock(blockTemplate)
   }
 
   private distributeNewBlock(newBlock: SerializedBlockTemplate) {
