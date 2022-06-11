@@ -276,12 +276,12 @@ export class StratumServer {
 
     const serialized = JSON.stringify(message) + '\n'
 
-    this.logger.debug('broadcasting to clients', {
-      method,
-      id: message.id,
-      numClients: this.clients.size,
-      messageLength: serialized.length,
-    })
+    // this.logger.debug('broadcasting to clients', {
+    //   method,
+    //   id: message.id,
+    //   numClients: this.clients.size,
+    //   messageLength: serialized.length,
+    // })
 
     for (const client of this.clients.values()) {
       if (this.badClients.has(client.id)) {
@@ -294,12 +294,12 @@ export class StratumServer {
 
       client.socket.write(serialized)
     }
-    this.logger.debug('completed broadcast to clients', {
-      method,
-      id: message.id,
-      numClients: this.clients.size,
-      messageLength: serialized.length,
-    })
+    // this.logger.debug('completed broadcast to clients', {
+    //   method,
+    //   id: message.id,
+    //   numClients: this.clients.size,
+    //   messageLength: serialized.length,
+    // })
   }
 
   private send(

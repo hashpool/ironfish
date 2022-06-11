@@ -280,7 +280,6 @@ export class MiningPool {
       await this.shares.submitShare(client.publicAddress)
     } else {
       this.logger.error('High hash pool share submitted')
-      // this.logger.debug(`headerBytes: ${headerBytes.toString('hex')}`)
       this.stratum.submitReply(client, false, "Pool share high hash")
     }
   }
@@ -382,7 +381,7 @@ export class MiningPool {
     blockTemplate.header.timestamp = newTime.getTime()
     this.distributeNewBlock(blockTemplate)
 
-    this.logger.debug('target recalculated', { prevHash: latestBlock.header.previousBlockHash })
+    // this.logger.debug('target recalculated', { prevHash: latestBlock.header.previousBlockHash })
   }
 
   private distributeNewBlock(newBlock: SerializedBlockTemplate) {
