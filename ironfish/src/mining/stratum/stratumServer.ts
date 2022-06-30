@@ -180,7 +180,7 @@ export class StratumServer {
             })
             return
           }
-
+	  /**
           // TODO: Remove when making version required
           if (body.result.version === undefined) {
             this.peers.shadowBan(client)
@@ -199,7 +199,7 @@ export class StratumServer {
             })
             return
           }
-
+		*/
           client.publicAddress = body.result.publicAddress
           client.subscribed = true
 
