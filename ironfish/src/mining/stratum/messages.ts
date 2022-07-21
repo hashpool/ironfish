@@ -50,6 +50,27 @@ export type MiningSubmitedMessage = {
   error: string
 }
 
+export type MiningGetStatusMessage =
+  | {
+      publicAddress?: string
+    }
+  | undefined
+
+export type MiningStatusMessage = {
+  name: string
+  hashRate: number
+  miners: number
+  clients: number
+  bans: number
+  sharesPending: number
+  addressStatus?: {
+    publicAddress: string
+    hashRate: number
+    miners: number
+    sharesPending: number
+  }
+}
+
 export const StratumMessageSchema: yup.ObjectSchema<StratumMessage> = yup
   .object({
     id: yup.number().required(),
@@ -103,5 +124,30 @@ export const MiningSubmitSchema: yup.ObjectSchema<MiningSubmitMessage> = yup
     miningRequestId: yup.number().required(),
     randomness: yup.string().required(),
     graffiti: yup.string().notRequired(),
+  })
+  .required()
+
+export const MiningGetStatusSchema: yup.ObjectSchema<MiningGetStatusMessage> = yup
+  .object({
+    publicAddress: yup.string().optional(),
+  })
+  .default(undefined)
+
+export const MiningStatusSchema: yup.ObjectSchema<MiningStatusMessage> = yup
+  .object({
+    name: yup.string().required(),
+    hashRate: yup.number().required(),
+    miners: yup.number().required(),
+    sharesPending: yup.number().required(),
+    clients: yup.number().required(),
+    bans: yup.number().required(),
+    addressStatus: yup
+      .object({
+        publicAddress: yup.string().required(),
+        hashRate: yup.number().required(),
+        miners: yup.number().required(),
+        sharesPending: yup.number().required(),
+      })
+      .default(undefined),
   })
   .required()
