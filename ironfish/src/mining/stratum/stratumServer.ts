@@ -188,8 +188,8 @@ export class StratumServer {
             })
             return
           }
-
-	  /**
+          
+          /**
           if (body.result.version < this.versionMin) {
             this.peers.ban(client, {
               message: `Client version ${body.result.version} does not meet minimum version ${this.versionMin}`,
@@ -199,8 +199,7 @@ export class StratumServer {
             })
             return
           }
-		*/
-
+		      */
 
           if (!isValidPublicAddress(body.result.publicAddress)) {
             this.peers.ban(client, {
