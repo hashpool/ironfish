@@ -4,6 +4,7 @@
 
 import '../testUtilities/matchers/merkletree'
 import { makeTree } from '../testUtilities/helpers/merkletree'
+import { createTestDB } from '../testUtilities/helpers/storage'
 import { MerkleTree, Side } from './merkletree'
 import { depthAtLeafCount } from './utils'
 
@@ -17,12 +18,14 @@ describe('Merkle tree', function () {
   })
 
   it("doesn't reset db on second run", async () => {
-    const tree1 = await makeTree()
+    const { location } = await createTestDB(false)
+
+    const tree1 = await makeTree({ location })
     await tree1.add('a')
     await expect(tree1.size()).resolves.toBe(1)
     await tree1.db.close()
 
-    const tree2 = await makeTree({ db: tree1.db })
+    const tree2 = await makeTree({ location })
     await expect(tree2.size()).resolves.toBe(1)
     await tree2.db.close()
   })
@@ -37,17 +40,76 @@ describe('Merkle tree', function () {
     await tree2.add('B')
 
     expect(await tree1.size()).toBe(1)
-    expect(await tree1.get(0)).toBe('a')
     expect(await tree1.rootHash()).toBe(
       '<<<<a|a-0>|<a|a-0>-1>|<<a|a-0>|<a|a-0>-1>-2>|<<<a|a-0>|<a|a-0>-1>|<<a|a-0>|<a|a-0>-1>-2>-3>',
     )
 
     expect(await tree2.size()).toBe(2)
-    expect(await tree2.get(0)).toBe('A')
-    expect(await tree2.get(1)).toBe('B')
     expect(await tree2.rootHash()).toBe(
       '<<<<A|B-0>|<A|B-0>-1>|<<A|B-0>|<A|B-0>-1>-2>|<<<A|B-0>|<A|B-0>-1>|<<A|B-0>|<A|B-0>-1>-2>-3>',
     )
+  })
+
+  it('rehashes tree when rightmost branch nodes have no sibling nodes', async () => {
+    const tree = await makeTree()
+
+    await tree.addBatch('abc')
+    await expect(tree).toHaveLeaves('abc', [1, 1, 2])
+    await expect(tree).toHaveNodes([
+      [1, Side.Left, 3, '<c|c-0>'],
+      [2, Side.Right, 1, '<a|b-0>'],
+      [3, Side.Left, 0, '<<a|b-0>|<c|c-0>-1>'],
+    ])
+
+    await tree.addBatch('defghi')
+    await expect(tree).toHaveLeaves('abcdefghi', [1, 1, 2, 2, 4, 4, 7, 7, 8])
+    await expect(tree).toHaveNodes([
+      [1, Side.Left, 3, '<c|d-0>'],
+      [2, Side.Right, 1, '<a|b-0>'],
+      [3, Side.Left, 6, '<<e|f-0>|<g|h-0>-1>'],
+      [4, Side.Left, 5, '<g|h-0>'],
+      [5, Side.Right, 3, '<<a|b-0>|<c|d-0>-1>'],
+      [6, Side.Left, 11, '<<<i|i-0>|<i|i-0>-1>|<<i|i-0>|<i|i-0>-1>-2>'],
+      [7, Side.Right, 4, '<e|f-0>'],
+      [8, Side.Left, 9, '<i|i-0>'],
+      [9, Side.Left, 10, '<<i|i-0>|<i|i-0>-1>'],
+      [10, Side.Right, 6, '<<<a|b-0>|<c|d-0>-1>|<<e|f-0>|<g|h-0>-1>-2>'],
+      [
+        11,
+        Side.Left,
+        0,
+        '<<<<a|b-0>|<c|d-0>-1>|<<e|f-0>|<g|h-0>-1>-2>|<<<i|i-0>|<i|i-0>-1>|<<i|i-0>|<i|i-0>-1>-2>-3>',
+      ],
+    ])
+  })
+
+  it('Rehashes tree when hashing partial rightmost tree with no sibling nodes', async () => {
+    const tree = await makeTree()
+
+    await tree.addBatch('abcdefghij')
+
+    await tree.addBatch('k')
+
+    await expect(tree).toHaveLeaves('abcdefghijk', [1, 1, 2, 2, 4, 4, 7, 7, 8, 8, 12])
+    await expect(tree).toHaveNodes([
+      [1, Side.Left, 3, '<c|d-0>'],
+      [2, Side.Right, 1, '<a|b-0>'],
+      [3, Side.Left, 6, '<<e|f-0>|<g|h-0>-1>'],
+      [4, Side.Left, 5, '<g|h-0>'],
+      [5, Side.Right, 3, '<<a|b-0>|<c|d-0>-1>'],
+      [6, Side.Left, 11, '<<<i|j-0>|<k|k-0>-1>|<<i|j-0>|<k|k-0>-1>-2>'],
+      [7, Side.Right, 4, '<e|f-0>'],
+      [8, Side.Left, 9, '<k|k-0>'],
+      [9, Side.Left, 10, '<<i|j-0>|<k|k-0>-1>'],
+      [10, Side.Right, 6, '<<<a|b-0>|<c|d-0>-1>|<<e|f-0>|<g|h-0>-1>-2>'],
+      [
+        11,
+        Side.Left,
+        0,
+        '<<<<a|b-0>|<c|d-0>-1>|<<e|f-0>|<g|h-0>-1>-2>|<<<i|j-0>|<k|k-0>-1>|<<i|j-0>|<k|k-0>-1>-2>-3>',
+      ],
+      [12, Side.Right, 8, '<i|j-0>'],
+    ])
   })
 
   it('adds nodes correctly', async () => {
@@ -143,6 +205,59 @@ describe('Merkle tree', function () {
         '<<<<a|b-0>|<c|d-0>-1>|<<e|f-0>|<g|h-0>-1>-2>|<<<i|i-0>|<i|i-0>-1>|<<i|i-0>|<i|i-0>-1>-2>-3>',
       ],
     ])
+
+    await tree.addBatch('jklmnopqrstuvwxyz')
+    await expect(tree).toHaveLeaves(
+      'abcdefghijklmnopqrstuvwxyz',
+      [
+        1, 1, 2, 2, 4, 4, 7, 7, 8, 8, 12, 12, 13, 13, 15, 15, 16, 16, 21, 21, 22, 22, 24, 24,
+        25, 25,
+      ],
+    )
+    await expect(tree).toHaveNodes([
+      [1, Side.Left, 3, '<c|d-0>'],
+      [2, Side.Right, 1, '<a|b-0>'],
+      [3, Side.Left, 6, '<<e|f-0>|<g|h-0>-1>'],
+      [4, Side.Left, 5, '<g|h-0>'],
+      [5, Side.Right, 3, '<<a|b-0>|<c|d-0>-1>'],
+      [6, Side.Left, 11, '<<<i|j-0>|<k|l-0>-1>|<<m|n-0>|<o|p-0>-1>-2>'],
+      [7, Side.Right, 4, '<e|f-0>'],
+      [8, Side.Left, 9, '<k|l-0>'],
+      [9, Side.Left, 10, '<<m|n-0>|<o|p-0>-1>'],
+      [10, Side.Right, 6, '<<<a|b-0>|<c|d-0>-1>|<<e|f-0>|<g|h-0>-1>-2>'],
+      [
+        11,
+        Side.Left,
+        20,
+        '<<<<q|r-0>|<s|t-0>-1>|<<u|v-0>|<w|x-0>-1>-2>|<<<y|z-0>|<y|z-0>-1>|<<y|z-0>|<y|z-0>-1>-2>-3>',
+      ],
+      [12, Side.Right, 8, '<i|j-0>'],
+      [13, Side.Left, 14, '<o|p-0>'],
+      [14, Side.Right, 9, '<<i|j-0>|<k|l-0>-1>'],
+      [15, Side.Right, 13, '<m|n-0>'],
+      [16, Side.Left, 17, '<s|t-0>'],
+      [17, Side.Left, 18, '<<u|v-0>|<w|x-0>-1>'],
+      [18, Side.Left, 19, '<<<y|z-0>|<y|z-0>-1>|<<y|z-0>|<y|z-0>-1>-2>'],
+      [
+        19,
+        Side.Right,
+        11,
+        '<<<<a|b-0>|<c|d-0>-1>|<<e|f-0>|<g|h-0>-1>-2>|<<<i|j-0>|<k|l-0>-1>|<<m|n-0>|<o|p-0>-1>-2>-3>',
+      ],
+      [
+        20,
+        Side.Left,
+        0,
+        '<<<<<a|b-0>|<c|d-0>-1>|<<e|f-0>|<g|h-0>-1>-2>|<<<i|j-0>|<k|l-0>-1>|<<m|n-0>|<o|p-0>-1>-2>-3>|<<<<q|r-0>|<s|t-0>-1>|<<u|v-0>|<w|x-0>-1>-2>|<<<y|z-0>|<y|z-0>-1>|<<y|z-0>|<y|z-0>-1>-2>-3>-4>',
+      ],
+      [21, Side.Right, 16, '<q|r-0>'],
+      [22, Side.Left, 23, '<w|x-0>'],
+      [23, Side.Right, 17, '<<q|r-0>|<s|t-0>-1>'],
+      [24, Side.Right, 22, '<u|v-0>'],
+      [25, Side.Left, 26, '<y|z-0>'],
+      [26, Side.Left, 27, '<<y|z-0>|<y|z-0>-1>'],
+      [27, Side.Right, 18, '<<<q|r-0>|<s|t-0>-1>|<<u|v-0>|<w|x-0>-1>-2>'],
+    ])
   })
 
   it('truncates nodes correctly', async () => {
@@ -169,27 +284,16 @@ describe('Merkle tree', function () {
     await expect(tree.size()).resolves.toBe(3)
   })
 
-  it('iterates over notes', async () => {
-    const tree = await makeTree({ leaves: 'abcd' })
-
-    let notes = ''
-    for await (const note of tree.notes()) {
-      notes += note
-    }
-
-    expect(notes).toBe('abcd')
-  })
-
   it('calculates past and current root hashes correctly', async () => {
     const tree = await makeTree({ depth: 4 })
 
-    await expect(tree.rootHash()).rejects.toThrowError(
+    await expect(tree.rootHash()).rejects.toThrow(
       `Unable to get past size 0 for tree with 0 nodes`,
     )
-    await expect(tree.pastRoot(0)).rejects.toThrowError(
+    await expect(tree.pastRoot(0)).rejects.toThrow(
       `Unable to get past size 0 for tree with 0 nodes`,
     )
-    await expect(tree.pastRoot(1)).rejects.toThrowError(
+    await expect(tree.pastRoot(1)).rejects.toThrow(
       `Unable to get past size 1 for tree with 0 nodes`,
     )
 
@@ -200,7 +304,7 @@ describe('Merkle tree', function () {
     await expect(tree.pastRoot(1)).resolves.toBe(
       '<<<<a|a-0>|<a|a-0>-1>|<<a|a-0>|<a|a-0>-1>-2>|<<<a|a-0>|<a|a-0>-1>|<<a|a-0>|<a|a-0>-1>-2>-3>',
     )
-    await expect(tree.pastRoot(2)).rejects.toThrowError(
+    await expect(tree.pastRoot(2)).rejects.toThrow(
       `Unable to get past size 2 for tree with 1 nodes`,
     )
 
@@ -214,7 +318,7 @@ describe('Merkle tree', function () {
     await expect(tree.pastRoot(2)).resolves.toBe(
       '<<<<a|b-0>|<a|b-0>-1>|<<a|b-0>|<a|b-0>-1>-2>|<<<a|b-0>|<a|b-0>-1>|<<a|b-0>|<a|b-0>-1>-2>-3>',
     )
-    await expect(tree.pastRoot(3)).rejects.toThrowError(
+    await expect(tree.pastRoot(3)).rejects.toThrow(
       `Unable to get past size 3 for tree with 2 nodes`,
     )
 
@@ -231,7 +335,7 @@ describe('Merkle tree', function () {
     await expect(tree.pastRoot(3)).resolves.toBe(
       '<<<<a|b-0>|<c|c-0>-1>|<<a|b-0>|<c|c-0>-1>-2>|<<<a|b-0>|<c|c-0>-1>|<<a|b-0>|<c|c-0>-1>-2>-3>',
     )
-    await expect(tree.pastRoot(4)).rejects.toThrowError(
+    await expect(tree.pastRoot(4)).rejects.toThrow(
       `Unable to get past size 4 for tree with 3 nodes`,
     )
 
@@ -251,7 +355,7 @@ describe('Merkle tree', function () {
     await expect(tree.pastRoot(4)).resolves.toBe(
       '<<<<a|b-0>|<c|d-0>-1>|<<a|b-0>|<c|d-0>-1>-2>|<<<a|b-0>|<c|d-0>-1>|<<a|b-0>|<c|d-0>-1>-2>-3>',
     )
-    await expect(tree.pastRoot(5)).rejects.toThrowError(
+    await expect(tree.pastRoot(5)).rejects.toThrow(
       `Unable to get past size 5 for tree with 4 nodes`,
     )
 
@@ -310,7 +414,7 @@ describe('Merkle tree', function () {
     await expect(tree.pastRoot(16)).resolves.toBe(
       '<<<<a|b-0>|<c|d-0>-1>|<<0|1-0>|<2|3-0>-1>-2>|<<<4|5-0>|<6|7-0>-1>|<<8|9-0>|<10|11-0>-1>-2>-3>',
     )
-    await expect(tree.pastRoot(17)).rejects.toThrowError(
+    await expect(tree.pastRoot(17)).rejects.toThrow(
       `Unable to get past size 17 for tree with 16 nodes`,
     )
   })
@@ -342,7 +446,6 @@ describe('Merkle tree', function () {
       await tree.truncate(i)
 
       expect(await tree.contains(element)).toBe(false)
-      expect(await tree.contained(element, elementSize)).toBe(false)
 
       // check that the rest of the elements are still there
       for (let j = 0; j < i; j++) {
@@ -518,15 +621,7 @@ describe('Merkle tree', function () {
   })
 
   it('witness rootHash should equal the tree rootHash', async () => {
-    const tree = await makeTree({ depth: 3 })
-    await tree.add('a')
-    await tree.add('b')
-    await tree.add('c')
-    await tree.add('d')
-    await tree.add('e')
-    await tree.add('f')
-    await tree.add('g')
-    await tree.add('h')
+    const tree = await makeTree({ depth: 3, leaves: 'abcdefgh' })
 
     const rootHash = await tree.rootHash()
     for (let i = 0; i < (await tree.size()); i++) {
@@ -536,18 +631,6 @@ describe('Merkle tree', function () {
       }
       expect(witness.rootHash).toEqual(rootHash)
     }
-  })
-
-  it("throws an error when getting a position that doesn't exist", async () => {
-    const tree = await makeTree()
-    await expect(() => tree.get(99)).rejects.toThrowError(
-      `No leaf found in tree ${tree.name} at index 99`,
-    )
-
-    await tree.add('1')
-    await expect(() => tree.get(99)).rejects.toThrowError(
-      `No leaf found in tree ${tree.name} at index 99`,
-    )
   })
 
   it('calculates correct depths', () => {

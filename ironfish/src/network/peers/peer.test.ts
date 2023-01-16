@@ -2,32 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import * as encryption from './encryption'
-
 jest.mock('ws')
-jest.mock('./encryption', () => {
-  const originalModule = jest.requireActual<typeof encryption>('./encryption')
-
-  return {
-    ...originalModule,
-    boxMessage: jest
-      .fn()
-      .mockReturnValue({ nonce: 'boxMessageNonce', boxedMessage: 'boxMessageMessage' }),
-    unboxMessage: jest.fn().mockReturnValue(JSON.stringify({ type: 'offer' })),
-  }
-})
 
 import ws from 'ws'
 import { createRootLogger } from '../../logger'
 import { PeerListRequestMessage } from '../messages/peerListRequest'
 import { mockIdentity } from '../testUtilities'
-import {
-  ConnectionDirection,
-  ConnectionType,
-  WebRtcConnection,
-  WebSocketConnection,
-} from './connections'
-import { Peer } from './peer'
+import { ConnectionDirection, WebRtcConnection, WebSocketConnection } from './connections'
+import { BAN_SCORE, Peer } from './peer'
 
 jest.useFakeTimers()
 
@@ -66,34 +48,6 @@ describe('setWebSocketConnection', () => {
       connections: { webSocket: connection },
     })
   })
-
-  it('Call successfulConnection when CONNECTED', () => {
-    const identity = mockIdentity('peer')
-    const peer = new Peer(identity)
-    const connection = new WebSocketConnection(
-      new ws(''),
-      ConnectionDirection.Outbound,
-      createRootLogger(),
-    )
-    const retry = peer.getConnectionRetry(
-      ConnectionType.WebSocket,
-      ConnectionDirection.Outbound,
-    )
-    if (retry === null) {
-      throw new Error('Retry should not be null')
-    }
-    const successSpy = jest.spyOn(retry, 'successfulConnection')
-
-    connection.setState({ type: 'CONNECTED', identity: identity })
-    peer.setWebSocketConnection(connection)
-
-    expect(peer.state).toEqual({
-      type: 'CONNECTED',
-      identity: identity,
-      connections: { webSocket: connection },
-    })
-    expect(successSpy).toBeCalled()
-  })
 })
 
 describe('setWebRtcConnection', () => {
@@ -108,28 +62,6 @@ describe('setWebRtcConnection', () => {
       identity: identity,
       connections: { webRtc: connection },
     })
-  })
-
-  it('Updates supportedConnectionTypes when CONNECTED', () => {
-    const identity = mockIdentity('peer')
-    const peer = new Peer(identity)
-    const connection = new WebRtcConnection(true, createRootLogger())
-
-    const retry = peer.getConnectionRetry(ConnectionType.WebRtc, ConnectionDirection.Outbound)
-    if (retry === null) {
-      throw new Error('Retry should not be null')
-    }
-    const successSpy = jest.spyOn(retry, 'successfulConnection')
-
-    connection.setState({ type: 'CONNECTED', identity: identity })
-    peer.setWebRtcConnection(connection)
-
-    expect(peer.state).toEqual({
-      type: 'CONNECTED',
-      identity: identity,
-      connections: { webRtc: connection },
-    })
-    expect(successSpy).toBeCalled()
   })
 })
 
@@ -230,7 +162,7 @@ describe('Handles WebRTC message send failure', () => {
     const result = peer.send(message)
     expect(result).toBe(wsConnection)
     expect(peer.state.type).toEqual('CONNECTED')
-    expect(wsSendSpy).toBeCalledWith(message)
+    expect(wsSendSpy).toHaveBeenCalledWith(message)
   })
 })
 
@@ -265,11 +197,6 @@ it('Transitions to CONNECTED when a connection receives an identity', () => {
     createRootLogger(),
   )
   peer.setWebSocketConnection(connection)
-  const retry = peer.getConnectionRetry(ConnectionType.WebSocket, ConnectionDirection.Outbound)
-  if (retry === null) {
-    throw new Error('Retry should not be null')
-  }
-  const successSpy = jest.spyOn(retry, 'successfulConnection')
 
   expect(peer.state).toEqual({
     type: 'CONNECTING',
@@ -284,7 +211,6 @@ it('Transitions to CONNECTED when a connection receives an identity', () => {
     identity: identity,
     connections: { webSocket: connection },
   })
-  expect(successSpy).toBeCalled()
 })
 
 it('Transitions to CONNECTED when adding a connection with state CONNECTED', () => {
@@ -299,11 +225,6 @@ it('Transitions to CONNECTED when adding a connection with state CONNECTED', () 
     type: 'CONNECTED',
     identity,
   })
-  const retry = peer.getConnectionRetry(ConnectionType.WebSocket, ConnectionDirection.Outbound)
-  if (retry === null) {
-    throw new Error('Retry should not be null')
-  }
-  const successSpy = jest.spyOn(retry, 'successfulConnection')
 
   peer.setWebSocketConnection(connection)
 
@@ -312,7 +233,6 @@ it('Transitions to CONNECTED when adding a connection with state CONNECTED', () 
     identity: identity,
     connections: { webSocket: connection },
   })
-  expect(successSpy).toBeCalled()
 })
 
 it('Stays in CONNECTED when adding an additional connection', () => {
@@ -404,80 +324,32 @@ describe('Stays in CONNECTED when one connection disconnects', () => {
   })
 })
 
-describe('Updates supportedConnectionTypes when one connection disconnects with an error', () => {
-  it('WebSocket disconnects', () => {
+describe('punish', () => {
+  it('Emits onBanned when punish is called with BAN_SCORE.MAX', () => {
+    const identity = mockIdentity('peer')
     const peer = new Peer(null)
-
-    const retry = peer.getConnectionRetry(
-      ConnectionType.WebSocket,
-      ConnectionDirection.Outbound,
-    )
-    if (retry === null) {
-      throw new Error('Retry should not be null')
-    }
-    const failSpy = jest.spyOn(retry, 'failedConnection')
-
     const connection = new WebSocketConnection(
       new ws(''),
       ConnectionDirection.Outbound,
       createRootLogger(),
     )
+    connection.setState({
+      type: 'CONNECTED',
+      identity,
+    })
+
     peer.setWebSocketConnection(connection)
 
-    connection['_error'] = new Error('Test')
-    connection.setState({ type: 'DISCONNECTED' })
-    expect(failSpy).toBeCalled()
+    expect(peer.state).toEqual({
+      type: 'CONNECTED',
+      identity: identity,
+      connections: { webSocket: connection },
+    })
+
+    const onBannedHander = jest.fn()
+    peer.onBanned.on(onBannedHander)
+    peer.punish(BAN_SCORE.MAX, 'TESTING')
+
+    expect(onBannedHander).toHaveBeenCalled()
   })
-
-  it('WebRTC disconnects', () => {
-    const peer = new Peer(null)
-
-    const retry = peer.getConnectionRetry(ConnectionType.WebRtc, ConnectionDirection.Outbound)
-    if (retry === null) {
-      throw new Error('Retry should not be null')
-    }
-    const failSpy = jest.spyOn(retry, 'failedConnection')
-
-    const connection = new WebRtcConnection(true, createRootLogger())
-    peer.setWebRtcConnection(connection)
-
-    connection['_error'] = new Error('Test')
-    connection.setState({ type: 'DISCONNECTED' })
-
-    expect(failSpy).toBeCalled()
-  })
-})
-
-it('Does not clear knownPeers when transitioning to DISCONNECTED', () => {
-  // knownPeers represents other peers' connections to a given peer. Just because
-  // we disconnected from the peer doesn't mean that other peers also did so
-
-  const peer1Identity = mockIdentity('peer1')
-  const peer2Identity = mockIdentity('peer2')
-  const peer1 = new Peer(null)
-  const peer2 = new Peer(peer2Identity)
-  const connection = new WebSocketConnection(
-    new ws(''),
-    ConnectionDirection.Outbound,
-    createRootLogger(),
-  )
-  peer1.setWebSocketConnection(connection)
-  expect(peer1.state).toEqual({
-    type: 'CONNECTING',
-    identity: null,
-    connections: { webSocket: connection },
-  })
-  connection.setState({
-    type: 'CONNECTED',
-    identity: peer1Identity,
-  })
-  peer1.knownPeers.set(peer2Identity, peer2)
-  peer2.knownPeers.set(peer1Identity, peer1)
-
-  connection.close()
-
-  expect(peer1.knownPeers.size).toBe(1)
-  expect(peer1.knownPeers.has(peer2Identity)).toBeTruthy()
-  expect(peer2.knownPeers.size).toBe(1)
-  expect(peer2.knownPeers.has(peer1Identity)).toBeTruthy()
 })

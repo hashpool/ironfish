@@ -1,6 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+import { Asset } from '@ironfish/rust-nodejs'
 import { Meter, PromiseUtils, RpcConnectionError, RpcSocketClient, WebApi } from '@ironfish/sdk'
 import { Flags } from '@oclif/core'
 import { IronfishCommand } from '../../command'
@@ -111,7 +112,7 @@ export default class Faucet extends IronfishCommand {
     speed: Meter,
     api: WebApi,
   ): Promise<void> {
-    const status = await client.status()
+    const status = await client.getNodeStatus()
 
     if (!status.content.blockchain.synced) {
       this.log('Blockchain not synced, waiting 5s')
@@ -176,6 +177,7 @@ export default class Faucet extends IronfishCommand {
         publicAddress: ft.public_key,
         amount: BigInt(FAUCET_AMOUNT).toString(),
         memo: `Faucet for ${ft.id}`,
+        assetId: Asset.nativeId().toString('hex'),
       }
     })
 

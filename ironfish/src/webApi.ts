@@ -5,7 +5,7 @@
 import axios, { AxiosError, AxiosRequestConfig } from 'axios'
 import { FollowChainStreamResponse } from './rpc/routes/chain/followChain'
 import { Metric } from './telemetry'
-import { UnwrapPromise } from './utils/types'
+import { HasOwnProperty, UnwrapPromise } from './utils/types'
 
 type FaucetTransaction = {
   object: 'faucet_transaction'
@@ -15,18 +15,26 @@ type FaucetTransaction = {
   completed_at: string | null
 }
 
-export type ApiDepositUpload = {
+export const MultiAsssetTransactionTypes = [
+  'MULTI_ASSET_TRANSFER',
+  'MULTI_ASSET_BURN',
+  'MULTI_ASSET_MINT',
+]
+export type MultiAssetTypes = typeof MultiAsssetTransactionTypes[number]
+
+export type ApiMultiAssetUpload = {
   type: 'connected' | 'disconnected' | 'fork'
   block: {
     hash: string
+    previousBlockHash: string
     timestamp: number
     sequence: number
   }
   transactions: {
     hash: string
-    notes: {
-      memo: string
-      amount: number
+    multiAssets: {
+      type: MultiAssetTypes
+      assetName: string
     }[]
   }[]
 }
@@ -61,10 +69,22 @@ export class WebApi {
     this.getFundsEndpoint = options?.getFundsEndpoint || null
   }
 
-  async headDeposits(): Promise<string | null> {
+  async getMultiAssetAddress(): Promise<string> {
+    const response = await axios.get<{ address: string }>(`${this.host}/deposit/address`)
+    return response.data.address
+  }
+
+  async headMultiAsset(): Promise<string | null> {
     const response = await axios
-      .get<{ block_hash: string }>(`${this.host}/deposits/head`)
-      .catch(() => null)
+      .get<{ block_hash: string }>(`${this.host}/multi_asset/head`)
+      .catch((e) => {
+        // The API returns 404 for no head
+        if (IsAxiosError(e) && e.response?.status === 404) {
+          return null
+        }
+
+        throw e
+      })
 
     return response?.data.block_hash || null
   }
@@ -72,16 +92,23 @@ export class WebApi {
   async headBlocks(): Promise<string | null> {
     const response = await axios
       .get<{ hash: string }>(`${this.host}/blocks/head`)
-      .catch(() => null)
+      .catch((e) => {
+        // The API returns 404 for no head
+        if (IsAxiosError(e) && e.response?.status === 404) {
+          return null
+        }
+
+        throw e
+      })
 
     return response?.data.hash || null
   }
 
-  async uploadDeposits(deposits: ApiDepositUpload[]): Promise<void> {
+  async uploadMultiAsset(multiAssets: ApiMultiAssetUpload[]): Promise<void> {
     this.requireToken()
 
     const options = this.options({ 'Content-Type': 'application/json' })
-    await axios.post(`${this.host}/deposits`, { operations: deposits }, options)
+    await axios.post(`${this.host}/multi_asset`, { operations: multiAssets }, options)
   }
 
   async blocks(blocks: FollowChainStreamResponse[]): Promise<void> {
@@ -103,11 +130,6 @@ export class WebApi {
     const options = this.options({ 'Content-Type': 'application/json' })
 
     await axios.post(`${this.host}/blocks`, { blocks: serialized }, options)
-  }
-
-  async getDepositAddress(): Promise<string> {
-    const response = await axios.get<{ address: string }>(`${this.host}/deposits/address`)
-    return response.data.address
   }
 
   async getFunds(data: { email?: string; public_key: string }): Promise<{
@@ -196,7 +218,7 @@ export class WebApi {
     return response.data
   }
 
-  async submitTelemetry(payload: { points: Metric[]; graffiti: string }): Promise<void> {
+  async submitTelemetry(payload: { points: Metric[]; graffiti?: string }): Promise<void> {
     await axios.post(`${this.host}/telemetry`, payload)
   }
 
@@ -214,4 +236,8 @@ export class WebApi {
       throw new Error(`Token required for endpoint`)
     }
   }
+}
+
+export function IsAxiosError(e: unknown): e is AxiosError {
+  return typeof e === 'object' && e != null && HasOwnProperty(e, 'isAxiosError')
 }

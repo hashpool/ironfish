@@ -2,21 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { Asset, TRANSACTION_VERSION } from '@ironfish/rust-nodejs'
 import { BufferSet } from 'buffer-map'
+import { Assert } from '../assert'
 import { Blockchain } from '../blockchain'
+import {
+  getBlockSize,
+  getBlockWithMinersFeeSize,
+  getTransactionSize,
+} from '../network/utils/serializers'
 import { Spend } from '../primitives'
-import { Block } from '../primitives/block'
-import { BlockHash, BlockHeader } from '../primitives/blockheader'
+import { Block, GENESIS_BLOCK_SEQUENCE } from '../primitives/block'
+import { BlockHeader, transactionCommitment } from '../primitives/blockheader'
+import { BurnDescription } from '../primitives/burnDescription'
+import { MintDescription } from '../primitives/mintDescription'
 import { Target } from '../primitives/target'
-import { SerializedTransaction, Transaction } from '../primitives/transaction'
+import { Transaction } from '../primitives/transaction'
 import { IDatabaseTransaction } from '../storage'
-import { Strategy } from '../strategy'
+import { BufferUtils } from '../utils/buffer'
 import { WorkerPool } from '../workerPool'
-import { VerifyTransactionOptions } from '../workerPool/tasks/verifyTransaction'
-import { ALLOWED_BLOCK_FUTURE_SECONDS, GENESIS_BLOCK_SEQUENCE } from './consensus'
+import { isExpiredSequence } from './utils'
 
 export class Verifier {
-  strategy: Strategy
   chain: Blockchain
   private readonly workerPool: WorkerPool
 
@@ -26,72 +33,100 @@ export class Verifier {
   enableVerifyTarget = true
 
   constructor(chain: Blockchain, workerPool: WorkerPool) {
-    this.strategy = chain.strategy
     this.chain = chain
     this.workerPool = workerPool
   }
 
   /**
    * Verify that the block is internally consistent:
-   *  *  All transaction proofs are valid
    *  *  Header is valid
+   *  *  All transaction proofs are valid
    *  *  Miner's fee is transaction list fees + miner's reward
    */
   async verifyBlock(
     block: Block,
     options: { verifyTarget?: boolean } = { verifyTarget: true },
   ): Promise<VerificationResult> {
+    if (getBlockSize(block) > this.chain.consensus.parameters.maxBlockSizeBytes) {
+      return { valid: false, reason: VerificationResultReason.MAX_BLOCK_SIZE_EXCEEDED }
+    }
+
     // Verify the block header
     const blockHeaderValid = this.verifyBlockHeader(block.header, options)
     if (!blockHeaderValid.valid) {
       return blockHeaderValid
     }
 
+    const expectedTransactionCommitment = transactionCommitment(block.transactions)
+    if (!expectedTransactionCommitment.equals(block.header.transactionCommitment)) {
+      return { valid: false, reason: VerificationResultReason.INVALID_TRANSACTION_COMMITMENT }
+    }
+
     // Verify the transactions
-    const verificationResults = await Promise.all(
-      block.transactions.map((t) =>
-        this.verifyTransactionContextual(t, block.header, { verifyFees: false }),
-      ),
-    )
+    const notesLimit = 10
+    const verificationPromises = []
+
+    let transactionBatch = []
+    let runningNotesCount = 0
+    for (const [idx, tx] of block.transactions.entries()) {
+      if (isExpiredSequence(tx.expiration(), block.header.sequence)) {
+        return {
+          valid: false,
+          reason: VerificationResultReason.TRANSACTION_EXPIRED,
+        }
+      }
+
+      const mintVerify = this.verifyMints(tx.mints)
+      if (!mintVerify.valid) {
+        return mintVerify
+      }
+
+      const burnVerify = this.verifyBurns(tx.burns)
+      if (!burnVerify.valid) {
+        return burnVerify
+      }
+
+      transactionBatch.push(tx)
+
+      runningNotesCount += tx.notes.length
+
+      if (runningNotesCount >= notesLimit || idx === block.transactions.length - 1) {
+        verificationPromises.push(this.workerPool.verifyTransactions(transactionBatch))
+
+        transactionBatch = []
+        runningNotesCount = 0
+      }
+    }
+
+    const verificationResults = await Promise.all(verificationPromises)
 
     const invalidResult = verificationResults.find((f) => !f.valid)
     if (invalidResult !== undefined) {
       return invalidResult
     }
 
-    // Sum the totalTransactionFees and minersFee
-    let totalTransactionFees = BigInt(0)
-    let minersFee = BigInt(0)
-
     const transactionFees = await Promise.all(block.transactions.map((t) => t.fee()))
 
-    for (let i = 0; i < transactionFees.length; i++) {
-      const fee = transactionFees[i]
+    // Miner's fee should be only the first transaction
+    const minersFee = transactionFees.length > 0 ? transactionFees[0] : BigInt(0)
 
-      // Miner's fee should be only the first transaction
-      if (i === 0 && fee > 0) {
-        return { valid: false, reason: VerificationResultReason.MINERS_FEE_EXPECTED }
-      }
+    if (minersFee > 0) {
+      return { valid: false, reason: VerificationResultReason.MINERS_FEE_EXPECTED }
+    }
 
-      if (i !== 0 && fee < 0) {
+    // Sum the total transaction fees
+    let totalTransactionFees = BigInt(0)
+    for (const fee of transactionFees.slice(1)) {
+      if (fee < 0) {
         return { valid: false, reason: VerificationResultReason.INVALID_TRANSACTION_FEE }
       }
 
-      if (fee > 0) {
-        totalTransactionFees += fee
-      }
-      if (fee < 0) {
-        minersFee += fee
-      }
-    }
-
-    // minersFee should match the block header
-    if (block.header.minersFee !== minersFee) {
-      return { valid: false, reason: VerificationResultReason.MINERS_FEE_MISMATCH }
+      totalTransactionFees += fee
     }
 
     // minersFee should be (negative) miningReward + totalTransactionFees
-    const miningReward = block.header.strategy.miningReward(block.header.sequence)
+    const miningReward = this.chain.strategy.miningReward(block.header.sequence)
+
     if (minersFee !== BigInt(-1) * (BigInt(miningReward) + totalTransactionFees)) {
       return { valid: false, reason: VerificationResultReason.INVALID_MINERS_FEE }
     }
@@ -105,8 +140,7 @@ export class Verifier {
    * verify the transactions in the block.
    *
    * Specifically, it verifies that:
-   *  *  miners fee contains only one output note and no spends
-   *  *  miners fee is a valid transaction
+   *  *  graffiti is the appropriate length
    *  *  the block hash meets the target hash on the block
    *  *  the timestamp is not in future by our local clock time
    */
@@ -122,7 +156,10 @@ export class Verifier {
       return { valid: false, reason: VerificationResultReason.HASH_NOT_MEET_TARGET }
     }
 
-    if (blockHeader.timestamp.getTime() > Date.now() + ALLOWED_BLOCK_FUTURE_SECONDS * 1000) {
+    if (
+      blockHeader.timestamp.getTime() >
+      Date.now() + this.chain.consensus.parameters.allowedBlockFutureSeconds * 1000
+    ) {
       return { valid: false, reason: VerificationResultReason.TOO_FAR_IN_FUTURE }
     }
 
@@ -130,55 +167,113 @@ export class Verifier {
   }
 
   /**
-   * Verify that a new transaction received over the network has valid proofs
-   * before forwarding it to the network.
+   * Verify that the header of this block is consistent with the one before it.
    *
-   * @params payload an unknown message payload that peerNetwork has received from the network.
-   *
-   * @returns deserialized transaction to be processed by the main handler.
+   * Specifically, it checks:
+   *  -  The block's previousHash equals the hash of the previous block header
+   *  -  The timestamp of the block is within a threshold of not being before
+   *     the previous block
+   *  -  The block sequence has incremented by one
+   *  -  The target matches the expected value
    */
-  verifyNewTransaction(serializedTransaction: SerializedTransaction): Transaction {
-    try {
-      const transaction = this.strategy.transactionSerde.deserialize(serializedTransaction)
-
-      // Transaction is lazily deserialized, so we use takeReference()
-      // to force deserialization errors here
-      transaction.takeReference()
-
-      return transaction
-    } catch (e) {
-      let message = 'Transaction cannot deserialize.'
-      if (e instanceof Error) {
-        message += ` Message: ${e.message}`
-      }
-      throw new Error(message)
-    }
-  }
-
-  async verifyTransactionContextual(
-    transaction: Transaction,
-    block: BlockHeader,
-    options?: VerifyTransactionOptions,
-  ): Promise<VerificationResult> {
-    if (this.isExpiredSequence(transaction.expirationSequence(), block.sequence)) {
-      return {
-        valid: false,
-        reason: VerificationResultReason.TRANSACTION_EXPIRED,
-      }
+  verifyBlockHeaderContextual(
+    current: BlockHeader,
+    previousHeader: BlockHeader,
+  ): VerificationResult {
+    if (!current.previousBlockHash.equals(previousHeader.hash)) {
+      return { valid: false, reason: VerificationResultReason.PREV_HASH_MISMATCH }
     }
 
-    return await this.verifyTransactionNoncontextual(transaction, options)
+    if (
+      current.timestamp.getTime() <
+      previousHeader.timestamp.getTime() -
+        this.chain.consensus.parameters.allowedBlockFutureSeconds * 1000
+    ) {
+      return { valid: false, reason: VerificationResultReason.BLOCK_TOO_OLD }
+    }
+
+    if (current.sequence !== previousHeader.sequence + 1) {
+      return { valid: false, reason: VerificationResultReason.SEQUENCE_OUT_OF_ORDER }
+    }
+
+    if (!this.isValidTarget(current, previousHeader)) {
+      return { valid: false, reason: VerificationResultReason.INVALID_TARGET }
+    }
+
+    return { valid: true }
   }
 
-  async verifyTransactionNoncontextual(
-    transaction: Transaction,
-    options?: VerifyTransactionOptions,
-  ): Promise<VerificationResult> {
+  /**
+   * Verify that a new transaction received over the network can be accepted into
+   * the mempool and rebroadcasted to the network.
+   */
+  async verifyNewTransaction(transaction: Transaction): Promise<VerificationResult> {
+    let verificationResult = this.chain.verifier.verifyCreatedTransaction(transaction)
+    if (!verificationResult.valid) {
+      return verificationResult
+    }
+
+    // Currently we only support one transaction version. This is checked when
+    // we call workerPool.verify but doing it here as well for efficiency
+    if (transaction.version() !== TRANSACTION_VERSION) {
+      return { valid: false, reason: VerificationResultReason.INVALID_TRANSACTION_VERSION }
+    }
+
     try {
-      return await this.workerPool.verify(transaction, options)
+      verificationResult = await this.workerPool.verify(transaction)
     } catch {
-      return { valid: false, reason: VerificationResultReason.VERIFY_TRANSACTION }
+      verificationResult = { valid: false, reason: VerificationResultReason.VERIFY_TRANSACTION }
     }
+
+    if (!verificationResult.valid) {
+      return verificationResult
+    }
+
+    const reason = await this.chain.db.withTransaction(null, async (tx) => {
+      for (const spend of transaction.spends) {
+        // If the spend references a larger tree size, allow it, so it's possible to
+        // store transactions made while the node is a few blocks behind
+        // TODO: We're not calling verifySpend here because we're often creating spends with tree size
+        // + root at the head of the chain, rather than a reasonable confirmation range back. These blocks
+        // (and spends) can eventually become valid if the chain forks to them.
+        // Calculating the notes rootHash is also expensive at the time of writing, so performance test
+        // before verifying the rootHash on spends.
+        if (await this.chain.nullifiers.contains(spend.nullifier, tx)) {
+          return VerificationResultReason.DOUBLE_SPEND
+        }
+      }
+    })
+
+    if (reason) {
+      return { valid: false, reason }
+    }
+
+    return { valid: true }
+  }
+
+  /**
+   * Verify that a transaction created by the account can be accepted into the mempool
+   * and rebroadcasted to the network.
+   */
+  verifyCreatedTransaction(transaction: Transaction): VerificationResult {
+    if (
+      getTransactionSize(transaction) >
+      this.chain.consensus.parameters.maxBlockSizeBytes - getBlockWithMinersFeeSize()
+    ) {
+      return { valid: false, reason: VerificationResultReason.MAX_TRANSACTION_SIZE_EXCEEDED }
+    }
+
+    const mintVerify = this.verifyMints(transaction.mints)
+    if (!mintVerify.valid) {
+      return mintVerify
+    }
+
+    const burnVerify = this.verifyBurns(transaction.burns)
+    if (!burnVerify.valid) {
+      return burnVerify
+    }
+
+    return { valid: true }
   }
 
   async verifyTransactionSpends(
@@ -186,13 +281,17 @@ export class Verifier {
     tx?: IDatabaseTransaction,
   ): Promise<VerificationResult> {
     return this.chain.db.withTransaction(tx, async (tx) => {
-      const nullifierSize = await this.chain.nullifiers.size(tx)
+      const notesSize = await this.chain.notes.size(tx)
 
-      for (const spend of transaction.spends()) {
-        const reason = await this.verifySpend(spend, nullifierSize, tx)
+      for (const spend of transaction.spends) {
+        const reason = await this.verifySpend(spend, notesSize, tx)
 
         if (reason) {
           return { valid: false, reason }
+        }
+
+        if (await this.chain.nullifiers.contains(spend.nullifier, tx)) {
+          return { valid: false, reason: VerificationResultReason.DOUBLE_SPEND }
         }
       }
 
@@ -214,56 +313,8 @@ export class Verifier {
     return validity
   }
 
-  isExpiredSequence(expirationSequence: number, sequence: number): boolean {
-    return expirationSequence !== 0 && expirationSequence <= sequence
-  }
-
   /**
-   * Verify that the header of this block is consistent with the one before it.
-   *
-   * Specifically, it checks:
-   *  -  The number of notes added is equal to the difference between
-   *     commitment sizes
-   *  -  The number of nullifiers added is equal to the difference between
-   *     commitment sizes
-   *  -  The timestamp of the block is within a threshold of not being before
-   *     the previous block
-   *  -  The block sequence has incremented by one
-   */
-  isValidAgainstPrevious(current: Block, previousHeader: BlockHeader): VerificationResult {
-    const { notes, nullifiers } = current.counts()
-
-    if (current.header.noteCommitment.size !== previousHeader.noteCommitment.size + notes) {
-      return { valid: false, reason: VerificationResultReason.NOTE_COMMITMENT_SIZE }
-    }
-
-    if (
-      current.header.nullifierCommitment.size !==
-      previousHeader.nullifierCommitment.size + nullifiers
-    ) {
-      return { valid: false, reason: VerificationResultReason.NULLIFIER_COMMITMENT_SIZE }
-    }
-
-    if (
-      current.header.timestamp.getTime() <
-      previousHeader.timestamp.getTime() - ALLOWED_BLOCK_FUTURE_SECONDS * 1000
-    ) {
-      return { valid: false, reason: VerificationResultReason.BLOCK_TOO_OLD }
-    }
-
-    if (current.header.sequence !== previousHeader.sequence + 1) {
-      return { valid: false, reason: VerificationResultReason.SEQUENCE_OUT_OF_ORDER }
-    }
-
-    if (!this.isValidTarget(current.header, previousHeader)) {
-      return { valid: false, reason: VerificationResultReason.INVALID_TARGET }
-    }
-
-    return { valid: true }
-  }
-
-  /**
-   * Verify that the target of this block is correct aginst the block before it.
+   * Verify that the target of this block is correct against the block before it.
    */
   protected isValidTarget(header: BlockHeader, previous: BlockHeader): boolean {
     if (!this.enableVerifyTarget) {
@@ -274,6 +325,8 @@ export class Verifier {
       header.timestamp,
       previous.timestamp,
       previous.target,
+      this.chain.consensus.parameters.targetBlockTimeInSeconds,
+      this.chain.consensus.parameters.targetBucketTimeInSeconds,
     )
 
     return header.target.targetValue === expectedTarget.targetValue
@@ -289,11 +342,7 @@ export class Verifier {
       return { valid: false, reason: VerificationResultReason.PREV_HASH_NULL }
     }
 
-    if (!block.header.previousBlockHash.equals(prev.hash)) {
-      return { valid: false, reason: VerificationResultReason.PREV_HASH_MISMATCH }
-    }
-
-    let verification = this.isValidAgainstPrevious(block, prev)
+    let verification = this.verifyBlockHeaderContextual(block.header, prev)
     if (!verification.valid) {
       return verification
     }
@@ -316,23 +365,14 @@ export class Verifier {
     tx?: IDatabaseTransaction,
   ): Promise<VerificationResult> {
     return this.chain.db.withTransaction(tx, async (tx) => {
-      const spendsInThisBlock = Array.from(block.spends())
-      const processedSpends = new BufferSet()
+      const previousNotesSize = block.header.noteSize
+      Assert.isNotNull(previousNotesSize)
 
-      const previousNullifierSize =
-        block.header.nullifierCommitment.size - spendsInThisBlock.length
-
-      for (const spend of spendsInThisBlock.values()) {
-        if (processedSpends.has(spend.nullifier)) {
-          return { valid: false, reason: VerificationResultReason.DOUBLE_SPEND }
-        }
-
-        const verificationError = await this.verifySpend(spend, previousNullifierSize, tx)
+      for (const spend of block.spends()) {
+        const verificationError = await this.verifySpend(spend, previousNotesSize, tx)
         if (verificationError) {
           return { valid: false, reason: verificationError }
         }
-
-        processedSpends.add(spend.nullifier)
       }
 
       return { valid: true }
@@ -340,22 +380,44 @@ export class Verifier {
   }
 
   /**
-   * Verify that the given spend was not in the nullifiers tree when it was the given size,
-   * and that the root of the notes tree is the one that is actually associated with the
+   * Verify the block does not contain any double spends before connecting it
+   */
+  async verifyBlockConnect(
+    block: Block,
+    tx?: IDatabaseTransaction,
+  ): Promise<VerificationResult> {
+    const seen = new BufferSet()
+
+    for (const spend of block.spends()) {
+      if (seen.has(spend.nullifier)) {
+        return { valid: false, reason: VerificationResultReason.DOUBLE_SPEND }
+      }
+
+      if (await this.chain.nullifiers.contains(spend.nullifier, tx)) {
+        return { valid: false, reason: VerificationResultReason.DOUBLE_SPEND }
+      }
+
+      seen.add(spend.nullifier)
+    }
+
+    return { valid: true }
+  }
+
+  /**
+   * Verify that the root of the notes tree is the one that is actually associated with the
    * spend's spend root.
    *
    * @param spend the spend to be verified
-   * @param nullifierSize the size of the nullifiers tree at which the spend must not exist
+   * @param notesSize the size of the notes tree
    * @param tx optional transaction context within which to check the spends.
-   * TODO as its expensive, this would be a good place for a cache/map of verified Spends
    */
   async verifySpend(
     spend: Spend,
-    nullifierSize: number,
+    notesSize: number,
     tx?: IDatabaseTransaction,
   ): Promise<VerificationResultReason | undefined> {
-    if (await this.chain.nullifiers.contained(spend.nullifier, nullifierSize, tx)) {
-      return VerificationResultReason.DOUBLE_SPEND
+    if (spend.size > notesSize) {
+      return VerificationResultReason.NOTE_COMMITMENT_SIZE_TOO_LARGE
     }
 
     try {
@@ -369,12 +431,11 @@ export class Verifier {
   }
 
   /**
-   * Determine whether our trees match the commitment in the provided block.
+   * Determine whether the notes tree matches the commitment in the provided block.
    *
    * Matching means that the root hash of the tree when the tree is the size
-   * specified in the commitment is the same as the commitment,
-   * for both notes and nullifiers trees. Also verifies the spends, which have
-   * commitments as well.
+   * specified in the commitment is the same as the commitment. Also verifies the spends,
+   * which have commitments as well.
    */
   async verifyConnectedBlock(
     block: Block,
@@ -382,27 +443,11 @@ export class Verifier {
   ): Promise<VerificationResult> {
     return this.chain.db.withTransaction(tx, async (tx) => {
       const header = block.header
-      const noteSize = header.noteCommitment.size
-      const nullifierSize = header.nullifierCommitment.size
-      const actualNoteSize = await this.chain.notes.size(tx)
-      const actualNullifierSize = await this.chain.nullifiers.size(tx)
 
-      if (noteSize > actualNoteSize) {
-        return { valid: false, reason: VerificationResultReason.NOTE_COMMITMENT_SIZE }
-      }
-
-      if (nullifierSize > actualNullifierSize) {
-        return { valid: false, reason: VerificationResultReason.NULLIFIER_COMMITMENT_SIZE }
-      }
-
-      const pastNoteRoot = await this.chain.notes.pastRoot(noteSize, tx)
-      if (!pastNoteRoot.equals(header.noteCommitment.commitment)) {
+      Assert.isNotNull(header.noteSize)
+      const noteRoot = await this.chain.notes.pastRoot(header.noteSize, tx)
+      if (!noteRoot.equals(header.noteCommitment)) {
         return { valid: false, reason: VerificationResultReason.NOTE_COMMITMENT }
-      }
-
-      const pastNullifierRoot = await this.chain.nullifiers.pastRoot(nullifierSize, tx)
-      if (!pastNullifierRoot.equals(header.nullifierCommitment.commitment)) {
-        return { valid: false, reason: VerificationResultReason.NULLIFIER_COMMITMENT }
       }
 
       const spendVerification = await this.verifyConnectedSpends(block, tx)
@@ -413,30 +458,57 @@ export class Verifier {
       return { valid: true }
     })
   }
+
+  verifyMints(mints: MintDescription[]): VerificationResult {
+    for (const mint of mints) {
+      const humanName = BufferUtils.toHuman(mint.asset.name())
+      if (humanName.length === 0) {
+        return { valid: false, reason: VerificationResultReason.INVALID_ASSET_NAME }
+      }
+    }
+
+    return { valid: true }
+  }
+
+  verifyBurns(burns: BurnDescription[]): VerificationResult {
+    for (const burn of burns) {
+      if (burn.assetId.equals(Asset.nativeId())) {
+        return { valid: false, reason: VerificationResultReason.NATIVE_BURN }
+      }
+    }
+
+    return { valid: true }
+  }
 }
 
 export enum VerificationResultReason {
   BLOCK_TOO_OLD = 'Block timestamp is in past',
+  DESERIALIZATION = 'Failed to deserialize',
   DOUBLE_SPEND = 'Double spend',
   DUPLICATE = 'Duplicate',
   ERROR = 'Error',
+  GOSSIPED_GENESIS_BLOCK = 'Peer gossiped its genesis block',
   GRAFFITI = 'Graffiti field is not 32 bytes in length',
   HASH_NOT_MEET_TARGET = 'Hash does not meet target',
+  INVALID_ASSET_NAME = 'Asset name is blank',
+  INVALID_GENESIS_BLOCK = 'Peer is using a different genesis block',
   INVALID_MINERS_FEE = "Miner's fee is incorrect",
+  INVALID_PARENT = 'Invalid_parent',
   INVALID_SPEND = 'Invalid spend',
   INVALID_TARGET = 'Invalid target',
+  INVALID_TRANSACTION_COMMITMENT = 'Transaction commitment does not match transactions',
   INVALID_TRANSACTION_FEE = 'Transaction fee is incorrect',
   INVALID_TRANSACTION_PROOF = 'Invalid transaction proof',
-  INVALID_PARENT = 'Invalid_parent',
+  INVALID_TRANSACTION_VERSION = 'Invalid transaction version',
+  MAX_BLOCK_SIZE_EXCEEDED = 'Block size exceeds maximum',
+  MAX_TRANSACTION_SIZE_EXCEEDED = 'Transaction size exceeds maximum',
   MINERS_FEE_EXPECTED = 'Miners fee expected',
-  MINERS_FEE_MISMATCH = 'Miners fee does not match block header',
+  NATIVE_BURN = 'Attempting to burn the native asset',
   NOTE_COMMITMENT = 'Note_commitment',
-  NOTE_COMMITMENT_SIZE = 'Note commitment sizes do not match',
-  NULLIFIER_COMMITMENT = 'Nullifier_commitment',
-  NULLIFIER_COMMITMENT_SIZE = 'Nullifier commitment sizes do not match',
+  NOTE_COMMITMENT_SIZE_TOO_LARGE = 'Note commitment tree is smaller than referenced by the spend',
   ORPHAN = 'Block is an orphan',
-  PREV_HASH_NULL = 'Previous block hash is null',
   PREV_HASH_MISMATCH = 'Previous block hash does not match expected hash',
+  PREV_HASH_NULL = 'Previous block hash is null',
   SEQUENCE_OUT_OF_ORDER = 'Block sequence is out of order',
   TOO_FAR_IN_FUTURE = 'Timestamp is in future',
   TRANSACTION_EXPIRED = 'Transaction expired',
@@ -450,5 +522,4 @@ export enum VerificationResultReason {
 export interface VerificationResult {
   valid: boolean
   reason?: VerificationResultReason
-  hash?: BlockHash
 }

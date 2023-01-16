@@ -10,14 +10,13 @@ import {
   GetBlockTransactionsRequest,
   GetBlockTransactionsResponse,
 } from './messages/getBlockTransactions'
-import { GossipNetworkMessage } from './messages/gossipNetworkMessage'
+import { GetCompactBlockRequest, GetCompactBlockResponse } from './messages/getCompactBlock'
 import { IdentifyMessage } from './messages/identify'
 import { NetworkMessage } from './messages/networkMessage'
-import { NewBlockMessage } from './messages/newBlock'
 import { NewBlockHashesMessage } from './messages/newBlockHashes'
-import { NewBlockV2Message } from './messages/newBlockV2'
+import { NewCompactBlockMessage } from './messages/newCompactBlock'
 import { NewPooledTransactionHashes } from './messages/newPooledTransactionHashes'
-import { NewTransactionMessage } from './messages/newTransaction'
+import { NewTransactionsMessage } from './messages/newTransactions'
 import { PeerListMessage } from './messages/peerList'
 import { PeerListRequestMessage } from './messages/peerListRequest'
 import {
@@ -34,14 +33,12 @@ export const parseNetworkMessage = (buffer: Buffer): NetworkMessage => {
 
   if (isRpcNetworkMessageType(type)) {
     return parseRpcNetworkMessage(type, body)
-  } else if (isGossipNetworkMessageType(type)) {
-    return parseGossipNetworkMessage(type, body)
   }
 
   return parseGenericNetworkMessage(type, body)
 }
 
-const isRpcNetworkMessageType = (type: NetworkMessageType): boolean => {
+export const isRpcNetworkMessageType = (type: NetworkMessageType): boolean => {
   return [
     NetworkMessageType.CannotSatisfyRequest,
     NetworkMessageType.GetBlockHashesRequest,
@@ -52,11 +49,9 @@ const isRpcNetworkMessageType = (type: NetworkMessageType): boolean => {
     NetworkMessageType.PooledTransactionsResponse,
     NetworkMessageType.GetBlockTransactionsRequest,
     NetworkMessageType.GetBlockTransactionsResponse,
+    NetworkMessageType.GetCompactBlockRequest,
+    NetworkMessageType.GetCompactBlockResponse,
   ].includes(type)
-}
-
-const isGossipNetworkMessageType = (type: NetworkMessageType): boolean => {
-  return [NetworkMessageType.NewBlock, NetworkMessageType.NewTransaction].includes(type)
 }
 
 const parseRpcNetworkMessage = (
@@ -84,24 +79,12 @@ const parseRpcNetworkMessage = (
       return GetBlockTransactionsRequest.deserialize(body, rpcId)
     case NetworkMessageType.GetBlockTransactionsResponse:
       return GetBlockTransactionsResponse.deserialize(body, rpcId)
+    case NetworkMessageType.GetCompactBlockRequest:
+      return GetCompactBlockRequest.deserialize(body, rpcId)
+    case NetworkMessageType.GetCompactBlockResponse:
+      return GetCompactBlockResponse.deserialize(body, rpcId)
     default:
       throw new Error(`Unknown RPC network message type: ${type}`)
-  }
-}
-
-const parseGossipNetworkMessage = (
-  type: NetworkMessageType,
-  bodyWithHeader: Buffer,
-): GossipNetworkMessage => {
-  const { nonce, remaining: body } = GossipNetworkMessage.deserializeHeader(bodyWithHeader)
-
-  switch (type) {
-    case NetworkMessageType.NewBlock:
-      return NewBlockMessage.deserialize(body, nonce)
-    case NetworkMessageType.NewTransaction:
-      return NewTransactionMessage.deserialize(body, nonce)
-    default:
-      throw new Error(`Unknown gossip network message type: ${type}`)
   }
 }
 
@@ -119,12 +102,14 @@ const parseGenericNetworkMessage = (type: NetworkMessageType, body: Buffer): Net
       return SignalMessage.deserialize(body)
     case NetworkMessageType.SignalRequest:
       return SignalRequestMessage.deserialize(body)
-    case NetworkMessageType.NewBlockHashes:
-      return NewBlockHashesMessage.deserialize(body)
-    case NetworkMessageType.NewBlockV2:
-      return NewBlockV2Message.deserialize(body)
     case NetworkMessageType.NewPooledTransactionHashes:
       return NewPooledTransactionHashes.deserialize(body)
+    case NetworkMessageType.NewTransactions:
+      return NewTransactionsMessage.deserialize(body)
+    case NetworkMessageType.NewBlockHashes:
+      return NewBlockHashesMessage.deserialize(body)
+    case NetworkMessageType.NewCompactBlock:
+      return NewCompactBlockMessage.deserialize(body)
     default:
       throw new Error(`Unknown network message type: ${type}`)
   }

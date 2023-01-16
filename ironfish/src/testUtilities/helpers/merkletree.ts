@@ -8,10 +8,9 @@ import { NodeValue } from '../../merkletree/database/nodes'
 import { StructureHasher } from '../../merkletree/hasher'
 import { Side } from '../../merkletree/merkletree'
 import { IDatabase, IDatabaseEncoding, StringEncoding } from '../../storage'
-import { createDB } from '../helpers/storage'
+import { createTestDB } from '../helpers/storage'
 
 type StructureLeafValue = {
-  element: string
   merkleHash: string
   parentIndex: number
 }
@@ -20,7 +19,6 @@ class StructureLeafEncoding implements IDatabaseEncoding<StructureLeafValue> {
   serialize(value: StructureLeafValue): Buffer {
     const bw = bufio.write()
 
-    bw.writeVarString(value.element)
     bw.writeVarString(value.merkleHash)
     bw.writeU32(value.parentIndex)
 
@@ -30,12 +28,10 @@ class StructureLeafEncoding implements IDatabaseEncoding<StructureLeafValue> {
   deserialize(buffer: Buffer): StructureLeafValue {
     const bw = bufio.read(buffer, true)
 
-    const element = bw.readVarString()
     const merkleHash = bw.readVarString()
     const parentIndex = bw.readU32()
 
     return {
-      element,
       merkleHash,
       parentIndex,
     }
@@ -90,16 +86,19 @@ class StructureNodeEncoding implements IDatabaseEncoding<NodeValue<string>> {
 export async function makeTree({
   name,
   db,
+  location,
   depth,
   leaves,
 }: {
   name?: string
   db?: IDatabase
+  location?: string
   depth?: number
   leaves?: string
 } = {}): Promise<MerkleTree<string, string, string, string>> {
   if (!db) {
-    db = await createDB()
+    const { db: database } = await createTestDB(undefined, location)
+    db = database
   }
 
   const tree = new MerkleTree({
@@ -110,15 +109,13 @@ export async function makeTree({
     db: db,
     name: name,
     depth: depth,
+    defaultValue: '~',
   })
 
   await db.open()
-  await tree.upgrade()
 
   if (leaves) {
-    for (const i of leaves) {
-      await tree.add(i)
-    }
+    await tree.addBatch(leaves)
   }
 
   return tree

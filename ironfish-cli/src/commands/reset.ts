@@ -8,8 +8,6 @@ import { IronfishCommand } from '../command'
 import {
   ConfigFlag,
   ConfigFlagKey,
-  DatabaseFlag,
-  DatabaseFlagKey,
   DataDirFlag,
   DataDirFlagKey,
   VerboseFlag,
@@ -23,10 +21,9 @@ export default class Reset extends IronfishCommand {
     [VerboseFlagKey]: VerboseFlag,
     [ConfigFlagKey]: ConfigFlag,
     [DataDirFlagKey]: DataDirFlag,
-    [DatabaseFlagKey]: DatabaseFlag,
     confirm: Flags.boolean({
       default: false,
-      description: 'confirm without asking',
+      description: 'Confirm without asking',
     }),
   }
 
@@ -38,7 +35,7 @@ export default class Reset extends IronfishCommand {
     let confirmed = flags.confirm
 
     const warningMessage =
-      `\n/!\\ WARNING: This will permanently delete your accounts. You can back them up by loading the previous version of ironfish and running ironfish export. /!\\\n` +
+      `\n/!\\ WARNING: This will permanently delete your wallets. You can back them up by loading the previous version of ironfish and running ironfish export. /!\\\n` +
       '\nHave you read the warning? (Y)es / (N)o'
 
     confirmed = flags.confirm || (await CliUx.ux.confirm(warningMessage))
@@ -48,20 +45,18 @@ export default class Reset extends IronfishCommand {
       this.exit(0)
     }
 
-    const accountDatabasePath = this.sdk.config.accountDatabasePath
+    const walletDatabasePath = this.sdk.config.walletDatabasePath
     const chainDatabasePath = this.sdk.config.chainDatabasePath
     const hostFilePath: string = this.sdk.config.files.join(
       this.sdk.config.dataDir,
       HOST_FILE_NAME,
     )
-    const indexDatabasePath = this.sdk.config.indexDatabasePath
 
     const message =
       '\nYou are about to destroy your node databases. The following directories and files will be deleted:\n' +
-      `\nAccounts: ${accountDatabasePath}` +
+      `\nWallet: ${walletDatabasePath}` +
       `\nBlockchain: ${chainDatabasePath}` +
       `\nHosts: ${hostFilePath}` +
-      `\nIndexes: ${indexDatabasePath}` +
       `\n\nAre you sure? (Y)es / (N)o`
 
     confirmed = flags.confirm || (await CliUx.ux.confirm(message))
@@ -74,10 +69,9 @@ export default class Reset extends IronfishCommand {
     CliUx.ux.action.start('Deleting databases...')
 
     await Promise.all([
-      fsAsync.rm(accountDatabasePath, { recursive: true, force: true }),
+      fsAsync.rm(walletDatabasePath, { recursive: true, force: true }),
       fsAsync.rm(chainDatabasePath, { recursive: true, force: true }),
       fsAsync.rm(hostFilePath, { recursive: true, force: true }),
-      fsAsync.rm(indexDatabasePath, { recursive: true, force: true }),
     ])
 
     CliUx.ux.action.stop('Databases deleted successfully')

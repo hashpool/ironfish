@@ -2,10 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { TransactionPosted } from '@ironfish/rust-nodejs'
+import {
+  Asset,
+  ASSET_ID_LENGTH,
+  ASSET_LENGTH,
+  ENCRYPTED_NOTE_LENGTH,
+  PROOF_LENGTH,
+  TransactionPosted,
+} from '@ironfish/rust-nodejs'
 import { blake3 } from '@napi-rs/blake-hash'
 import bufio from 'bufio'
-import { Serde } from '../serde'
+import { BurnDescription } from './burnDescription'
+import { MintDescription } from './mintDescription'
 import { NoteEncrypted } from './noteEncrypted'
 import { Spend } from './spend'
 
@@ -16,12 +24,17 @@ export type SerializedTransaction = Buffer
 export class Transaction {
   private readonly transactionPostedSerialized: Buffer
 
+  public readonly notes: NoteEncrypted[]
+  public readonly spends: Spend[]
+  public readonly mints: MintDescription[]
+  public readonly burns: BurnDescription[]
+
+  private readonly _version: number
   private readonly _fee: bigint
-  private readonly _expirationSequence: number
-  private readonly _spends: Spend[] = []
-  private readonly _notes: NoteEncrypted[]
+  private readonly _expiration: number
   private readonly _signature: Buffer
   private _hash?: TransactionHash
+  private _unsignedHash?: TransactionHash
 
   private transactionPosted: TransactionPosted | null = null
   private referenceCount = 0
@@ -31,17 +44,22 @@ export class Transaction {
 
     const reader = bufio.read(this.transactionPostedSerialized, true)
 
+    this._version = reader.readU8() // 1
     const _spendsLength = reader.readU64() // 8
     const _notesLength = reader.readU64() // 8
+    const _mintsLength = reader.readU64() // 8
+    const _burnsLength = reader.readU64() // 8
     this._fee = BigInt(reader.readI64()) // 8
-    this._expirationSequence = reader.readU32() // 4
+    this._expiration = reader.readU32() // 4
+    // randomized public key of sender
+    // to read the value of rpk reader.readBytes(PUBLIC_ADDRESS_LENGTH, true).toString('hex')
+    reader.seek(32)
 
-    this._spends = Array.from({ length: _spendsLength }, () => {
+    // spend description
+    this.spends = Array.from({ length: _spendsLength }, () => {
       // proof
-      reader.seek(192)
+      reader.seek(PROOF_LENGTH)
       // value commitment
-      reader.seek(32)
-      // randomized public key
       reader.seek(32)
 
       const rootHash = reader.readHash() // 32
@@ -59,11 +77,33 @@ export class Transaction {
       }
     })
 
-    this._notes = Array.from({ length: _notesLength }, () => {
+    // output description
+    this.notes = Array.from({ length: _notesLength }, () => {
+      // proof
+      reader.seek(PROOF_LENGTH)
+
+      // output note
+      return new NoteEncrypted(reader.readBytes(ENCRYPTED_NOTE_LENGTH, true))
+    })
+
+    this.mints = Array.from({ length: _mintsLength }, () => {
       // proof
       reader.seek(192)
 
-      return new NoteEncrypted(reader.readBytes(275, true))
+      const asset = Asset.deserialize(reader.readBytes(ASSET_LENGTH))
+      const value = reader.readBigU64()
+
+      // authorizing signature
+      reader.seek(64)
+
+      return { asset, value }
+    })
+
+    this.burns = Array.from({ length: _burnsLength }, () => {
+      const assetId = reader.readBytes(ASSET_ID_LENGTH)
+      const value = reader.readBigU64()
+
+      return { assetId, value }
     })
 
     this._signature = reader.readBytes(64, true)
@@ -71,6 +111,14 @@ export class Transaction {
 
   serialize(): Buffer {
     return this.transactionPostedSerialized
+  }
+
+  /**
+   * The transaction serialization version. This can be incremented when
+   * changes need to be made to the transaction format
+   */
+  version(): number {
+    return this._version
   }
 
   /**
@@ -110,46 +158,22 @@ export class Transaction {
     return result
   }
 
-  /**
-   * The number of notes in the transaction.
-   */
-  notesLength(): number {
-    return this._notes.length
+  isMinersFee(): boolean {
+    return (
+      this.spends.length === 0 &&
+      this.notes.length === 1 &&
+      this.mints.length === 0 &&
+      this.burns.length === 0 &&
+      this._fee <= 0
+    )
   }
 
   getNote(index: number): NoteEncrypted {
-    return this._notes[index]
-  }
-
-  isMinersFee(): boolean {
-    return this._spends.length === 0 && this._notes.length === 1 && this._fee <= 0
-  }
-
-  /**
-   * Iterate over all the notes created by this transaction.
-   */
-  notes(): Iterable<NoteEncrypted> {
-    return this._notes.values()
-  }
-
-  /**
-   * The number of spends in the transaction.
-   */
-  spendsLength(): number {
-    return this._spends.length
-  }
-
-  /**
-   * Iterate over all the spends in the transaction. A spend includes a nullifier,
-   * indicating that a note was spent, and a commitment committing to
-   * the root hash and tree size at the time the note was spent.
-   */
-  spends(): Iterable<Spend> {
-    return this._spends.values()
+    return this.notes[index]
   }
 
   getSpend(index: number): Spend {
-    return this._spends[index]
+    return this.spends[index]
   }
 
   /**
@@ -182,12 +206,13 @@ export class Transaction {
    * is signed when the transaction is created
    */
   unsignedHash(): TransactionHash {
-    return this.withReference((t) => t.hash())
+    this._unsignedHash = this._unsignedHash || this.withReference((t) => t.hash())
+    return this._unsignedHash
   }
 
   /**
-   * Genereate the hash of a transaction that includes the witness (signature) data.
-   * Used for cases where a signature needs to be commited to in the hash like P2P transaction gossip
+   * Generate the hash of a transaction that includes the witness (signature) data.
+   * Used for cases where a signature needs to be committed to in the hash like P2P transaction gossip
    */
   hash(): TransactionHash {
     this._hash = this._hash || blake3(this.transactionPostedSerialized)
@@ -198,24 +223,11 @@ export class Transaction {
     return this.transactionPostedSerialized.equals(other.transactionPostedSerialized)
   }
 
-  expirationSequence(): number {
-    return this._expirationSequence
-  }
-}
-
-/**
- * Serializer and equality checker for Transaction wrappers.
- */
-export class TransactionSerde implements Serde<Transaction, SerializedTransaction> {
-  equals(tx1: Transaction, tx2: Transaction): boolean {
-    return tx1.equals(tx2)
-  }
-
-  serialize(transaction: Transaction): SerializedTransaction {
-    return transaction.serialize()
-  }
-
-  deserialize(data: SerializedTransaction): Transaction {
-    return new Transaction(data)
+  /**
+   * @returns The expiration as block sequence of the transaction.
+   * The transaction cannot be added to a block of equal or greater sequence
+   */
+  expiration(): number {
+    return this._expiration
   }
 }

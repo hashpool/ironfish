@@ -2,12 +2,18 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { NoteEncrypted as NativeNoteEncrypted } from '@ironfish/rust-nodejs'
+import {
+  ENCRYPTED_NOTE_LENGTH,
+  ENCRYPTED_NOTE_PLAINTEXT_LENGTH,
+  NOTE_ENCRYPTION_KEY_LENGTH,
+  NoteEncrypted as NativeNoteEncrypted,
+  PROOF_LENGTH,
+} from '@ironfish/rust-nodejs'
 import bufio from 'bufio'
 import { Serde } from '../serde'
 import { Note } from './note'
 
-export const ENCRYPTED_NOTE_LENGTH = 32 + 32 + 32 + 83 + 16 + 64 + 16
+export const NOTE_ENCRYPTED_SERIALIZED_SIZE_IN_BYTE = PROOF_LENGTH + ENCRYPTED_NOTE_LENGTH
 
 export type NoteEncryptedHash = Buffer
 export type SerializedNoteEncryptedHash = Buffer
@@ -32,19 +38,16 @@ export class NoteEncrypted {
     // note commitment
     this._noteCommitment = reader.readBytes(32)
 
-    // ephememeral public key
+    // ephemeral public key
     reader.seek(32)
     // encrypted note
-    reader.seek(83)
-    // aead MAC
-    reader.seek(16)
+    reader.seek(ENCRYPTED_NOTE_PLAINTEXT_LENGTH)
+
     // note encryption keys
-    reader.seek(64)
-    // aead MAC
-    reader.seek(16)
+    reader.seek(NOTE_ENCRYPTION_KEY_LENGTH)
 
     // total serialized size: 192 (proof from transaction)
-    // + 32 + 32 + 32 + 83 + 16 + 64 + 16 = 467 bytes
+    // + 32 + 32 + 32 + 104 + 16 + 64 + 16 = 488 bytes
   }
 
   serialize(): Buffer {
@@ -83,8 +86,12 @@ export class NoteEncrypted {
     }
   }
 
-  merkleHash(): Buffer {
+  merkleHash(): NoteEncryptedHash {
     return this._noteCommitment
+  }
+
+  equals(other: NoteEncrypted): boolean {
+    return this.serialize().equals(other.serialize())
   }
 }
 
@@ -93,7 +100,7 @@ export class NoteEncrypted {
  */
 export class NoteEncryptedSerde implements Serde<NoteEncrypted, SerializedNoteEncrypted> {
   equals(note1: NoteEncrypted, note2: NoteEncrypted): boolean {
-    return note1.serialize().equals(note2.serialize())
+    return note1.equals(note2)
   }
 
   serialize(note: NoteEncrypted): SerializedNoteEncrypted {

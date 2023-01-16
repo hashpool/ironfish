@@ -25,7 +25,7 @@ export class EditCommand extends IronfishCommand {
     [DataDirFlagKey]: DataDirFlag,
     remote: Flags.boolean({
       default: false,
-      description: 'connect to the node when editing the config',
+      description: 'Connect to the node when editing the config',
     }),
   }
 
@@ -44,7 +44,7 @@ export class EditCommand extends IronfishCommand {
     const output = JSON.stringify(response.content, undefined, '   ')
 
     const tmpDir = os.tmpdir()
-    const folderPath = await mkdtempAsync(path.join(tmpDir, '@ironfish/sdk'))
+    const folderPath = await mkdtempAsync(path.join(tmpDir, '@ironfish-sdk-'))
     const filePath = path.join(folderPath, DEFAULT_CONFIG_NAME)
 
     await writeFileAsync(filePath, output)

@@ -9,14 +9,18 @@ import {
   BlockTemplateStreamResponse,
   CreateAccountRequest,
   CreateAccountResponse,
-  GetAccountNotesRequest,
-  GetAccountNotesResponse,
+  EstimateFeeRequest,
+  EstimateFeeResponse,
+  GetAccountNotesStreamRequest,
+  GetAccountNotesStreamResponse,
   GetAccountsRequest,
   GetAccountsResponse,
   GetAccountTransactionRequest,
   GetAccountTransactionResponse,
   GetAccountTransactionsRequest,
   GetAccountTransactionsResponse,
+  GetAssetRequest,
+  GetAssetResponse,
   GetBalanceRequest,
   GetBalanceResponse,
   GetBlockInfoRequest,
@@ -27,21 +31,25 @@ import {
   GetChainInfoResponse,
   GetConfigRequest,
   GetConfigResponse,
+  GetConsensusParametersRequest,
+  GetConsensusParametersResponse,
   GetDefaultAccountRequest,
   GetDefaultAccountResponse,
   GetFundsRequest,
   GetFundsResponse,
   GetLogStreamResponse,
+  GetNodeStatusRequest,
+  GetNodeStatusResponse,
   GetPeersRequest,
   GetPeersResponse,
   GetPublicKeyRequest,
   GetPublicKeyResponse,
-  GetStatusRequest,
-  GetStatusResponse,
   GetTransactionStreamRequest,
   GetTransactionStreamResponse,
   GetWorkersStatusRequest,
   GetWorkersStatusResponse,
+  PostTransactionRequest,
+  PostTransactionResponse,
   SendTransactionRequest,
   SendTransactionResponse,
   SetConfigRequest,
@@ -56,10 +64,10 @@ import {
   UseAccountRequest,
   UseAccountResponse,
 } from '../routes'
-import { ExportAccountRequest, ExportAccountResponse } from '../routes/accounts/exportAccount'
-import { ImportAccountRequest, ImportAccountResponse } from '../routes/accounts/importAccount'
-import { RemoveAccountRequest, RemoveAccountResponse } from '../routes/accounts/removeAccount'
-import { RescanAccountRequest, RescanAccountResponse } from '../routes/accounts/rescanAccount'
+import {
+  EstimateFeeRatesRequest,
+  EstimateFeeRatesResponse,
+} from '../routes/chain/estimateFeeRates'
 import {
   ExportChainStreamRequest,
   ExportChainStreamResponse,
@@ -69,16 +77,20 @@ import {
   FollowChainStreamResponse,
 } from '../routes/chain/followChain'
 import { OnGossipRequest, OnGossipResponse } from '../routes/events/onGossip'
-import {
-  ExportMinedStreamRequest,
-  ExportMinedStreamResponse,
-} from '../routes/mining/exportMined'
 import { GetPeerRequest, GetPeerResponse } from '../routes/peers/getPeer'
 import {
   GetPeerMessagesRequest,
   GetPeerMessagesResponse,
 } from '../routes/peers/getPeerMessages'
 import { GetRpcStatusRequest, GetRpcStatusResponse } from '../routes/rpc/getStatus'
+import { BurnAssetRequest, BurnAssetResponse } from '../routes/wallet/burnAsset'
+import { ExportAccountRequest, ExportAccountResponse } from '../routes/wallet/exportAccount'
+import { GetBalancesRequest, GetBalancesResponse } from '../routes/wallet/getBalances'
+import { GetAccountStatusRequest, GetAccountStatusResponse } from '../routes/wallet/getStatus'
+import { ImportAccountRequest, ImportAccountResponse } from '../routes/wallet/importAccount'
+import { MintAssetRequest, MintAssetResponse } from '../routes/wallet/mintAsset'
+import { RemoveAccountRequest, RemoveAccountResponse } from '../routes/wallet/removeAccount'
+import { RescanAccountRequest, RescanAccountResponse } from '../routes/wallet/rescanAccount'
 
 export abstract class RpcClient {
   readonly logger: Logger
@@ -93,17 +105,17 @@ export abstract class RpcClient {
     options?: { timeoutMs?: number | null },
   ): RpcResponse<TEnd, TStream>
 
-  async status(
-    params: GetStatusRequest = undefined,
-  ): Promise<RpcResponseEnded<GetStatusResponse>> {
-    return this.request<GetStatusResponse>(
+  async getNodeStatus(
+    params: GetNodeStatusRequest = undefined,
+  ): Promise<RpcResponseEnded<GetNodeStatusResponse>> {
+    return this.request<GetNodeStatusResponse>(
       `${ApiNamespace.node}/getStatus`,
       params,
     ).waitForEnd()
   }
 
-  statusStream(): RpcResponse<void, GetStatusResponse> {
-    return this.request<void, GetStatusResponse>(`${ApiNamespace.node}/getStatus`, {
+  statusStream(): RpcResponse<void, GetNodeStatusResponse> {
+    return this.request<void, GetNodeStatusResponse>(`${ApiNamespace.node}/getStatus`, {
       stream: true,
     })
   }
@@ -120,7 +132,7 @@ export abstract class RpcClient {
     params: GetAccountsRequest = undefined,
   ): Promise<RpcResponseEnded<GetAccountsResponse>> {
     return await this.request<GetAccountsResponse>(
-      `${ApiNamespace.account}/getAccounts`,
+      `${ApiNamespace.wallet}/getAccounts`,
       params,
     ).waitForEnd()
   }
@@ -129,7 +141,7 @@ export abstract class RpcClient {
     params: GetDefaultAccountRequest = undefined,
   ): Promise<RpcResponseEnded<GetDefaultAccountResponse>> {
     return await this.request<GetDefaultAccountResponse>(
-      `${ApiNamespace.account}/getDefaultAccount`,
+      `${ApiNamespace.wallet}/getDefaultAccount`,
       params,
     ).waitForEnd()
   }
@@ -138,14 +150,14 @@ export abstract class RpcClient {
     params: CreateAccountRequest,
   ): Promise<RpcResponseEnded<CreateAccountResponse>> {
     return await this.request<CreateAccountResponse>(
-      `${ApiNamespace.account}/create`,
+      `${ApiNamespace.wallet}/create`,
       params,
     ).waitForEnd()
   }
 
   async useAccount(params: UseAccountRequest): Promise<RpcResponseEnded<UseAccountResponse>> {
     return await this.request<UseAccountResponse>(
-      `${ApiNamespace.account}/use`,
+      `${ApiNamespace.wallet}/use`,
       params,
     ).waitForEnd()
   }
@@ -154,7 +166,16 @@ export abstract class RpcClient {
     params: RemoveAccountRequest,
   ): Promise<RpcResponseEnded<RemoveAccountResponse>> {
     return await this.request<RemoveAccountResponse>(
-      `${ApiNamespace.account}/remove`,
+      `${ApiNamespace.wallet}/remove`,
+      params,
+    ).waitForEnd()
+  }
+
+  async getAccountBalances(
+    params: GetBalancesRequest,
+  ): Promise<RpcResponseEnded<GetBalancesResponse>> {
+    return this.request<GetBalancesResponse>(
+      `${ApiNamespace.wallet}/getBalances`,
       params,
     ).waitForEnd()
   }
@@ -163,7 +184,7 @@ export abstract class RpcClient {
     params: GetBalanceRequest = {},
   ): Promise<RpcResponseEnded<GetBalanceResponse>> {
     return this.request<GetBalanceResponse>(
-      `${ApiNamespace.account}/getBalance`,
+      `${ApiNamespace.wallet}/getBalance`,
       params,
     ).waitForEnd()
   }
@@ -172,7 +193,7 @@ export abstract class RpcClient {
     params: RescanAccountRequest = {},
   ): RpcResponse<void, RescanAccountResponse> {
     return this.request<void, RescanAccountResponse>(
-      `${ApiNamespace.account}/rescanAccount`,
+      `${ApiNamespace.wallet}/rescanAccount`,
       params,
     )
   }
@@ -181,7 +202,7 @@ export abstract class RpcClient {
     params: ExportAccountRequest = {},
   ): Promise<RpcResponseEnded<ExportAccountResponse>> {
     return this.request<ExportAccountResponse>(
-      `${ApiNamespace.account}/exportAccount`,
+      `${ApiNamespace.wallet}/exportAccount`,
       params,
     ).waitForEnd()
   }
@@ -190,7 +211,7 @@ export abstract class RpcClient {
     params: ImportAccountRequest,
   ): Promise<RpcResponseEnded<ImportAccountResponse>> {
     return this.request<ImportAccountResponse>(
-      `${ApiNamespace.account}/importAccount`,
+      `${ApiNamespace.wallet}/importAccount`,
       params,
     ).waitForEnd()
   }
@@ -199,16 +220,25 @@ export abstract class RpcClient {
     params: GetPublicKeyRequest,
   ): Promise<RpcResponseEnded<GetPublicKeyResponse>> {
     return this.request<GetPublicKeyResponse>(
-      `${ApiNamespace.account}/getPublicKey`,
+      `${ApiNamespace.wallet}/getPublicKey`,
       params,
     ).waitForEnd()
   }
 
-  async getAccountNotes(
-    params: GetAccountNotesRequest = {},
-  ): Promise<RpcResponseEnded<GetAccountNotesResponse>> {
-    return await this.request<GetAccountNotesResponse>(
-      `${ApiNamespace.account}/getAccountNotes`,
+  getAccountNotesStream(
+    params: GetAccountNotesStreamRequest = {},
+  ): RpcResponse<void, GetAccountNotesStreamResponse> {
+    return this.request<void, GetAccountNotesStreamResponse>(
+      `${ApiNamespace.wallet}/getAccountNotesStream`,
+      params,
+    )
+  }
+
+  async getAccountsStatus(
+    params: GetAccountStatusRequest,
+  ): Promise<RpcResponseEnded<GetAccountStatusResponse>> {
+    return this.request<GetAccountStatusResponse>(
+      `${ApiNamespace.wallet}/getAccountsStatus`,
       params,
     ).waitForEnd()
   }
@@ -217,18 +247,18 @@ export abstract class RpcClient {
     params: GetAccountTransactionRequest,
   ): Promise<RpcResponseEnded<GetAccountTransactionResponse>> {
     return await this.request<GetAccountTransactionResponse>(
-      `${ApiNamespace.account}/getAccountTransaction`,
+      `${ApiNamespace.wallet}/getAccountTransaction`,
       params,
     ).waitForEnd()
   }
 
-  async getAccountTransactions(
+  getAccountTransactionsStream(
     params: GetAccountTransactionsRequest,
-  ): Promise<RpcResponseEnded<GetAccountTransactionsResponse>> {
-    return await this.request<GetAccountTransactionsResponse>(
-      `${ApiNamespace.account}/getAccountTransactions`,
+  ): RpcResponse<void, GetAccountTransactionsResponse> {
+    return this.request<void, GetAccountTransactionsResponse>(
+      `${ApiNamespace.wallet}/getAccountTransactions`,
       params,
-    ).waitForEnd()
+    )
   }
 
   async getPeers(
@@ -313,11 +343,25 @@ export abstract class RpcClient {
     return this.request<void, OnGossipResponse>(`${ApiNamespace.event}/onGossip`, params)
   }
 
+  async mintAsset(params: MintAssetRequest): Promise<RpcResponseEnded<MintAssetResponse>> {
+    return this.request<MintAssetResponse>(
+      `${ApiNamespace.wallet}/mintAsset`,
+      params,
+    ).waitForEnd()
+  }
+
+  async burnAsset(params: BurnAssetRequest): Promise<RpcResponseEnded<BurnAssetResponse>> {
+    return this.request<BurnAssetResponse>(
+      `${ApiNamespace.wallet}/burnAsset`,
+      params,
+    ).waitForEnd()
+  }
+
   async sendTransaction(
     params: SendTransactionRequest,
   ): Promise<RpcResponseEnded<SendTransactionResponse>> {
     return this.request<SendTransactionResponse>(
-      `${ApiNamespace.transaction}/sendTransaction`,
+      `${ApiNamespace.wallet}/sendTransaction`,
       params,
     ).waitForEnd()
   }
@@ -338,18 +382,27 @@ export abstract class RpcClient {
     ).waitForEnd()
   }
 
-  exportMinedStream(
-    params: ExportMinedStreamRequest = undefined,
-  ): RpcResponse<void, ExportMinedStreamResponse> {
-    return this.request<void, ExportMinedStreamResponse>(
-      `${ApiNamespace.miner}/exportMinedStream`,
-      params,
-    )
-  }
-
   async getFunds(params: GetFundsRequest): Promise<RpcResponseEnded<GetFundsResponse>> {
     return this.request<GetFundsResponse>(
       `${ApiNamespace.faucet}/getFunds`,
+      params,
+    ).waitForEnd()
+  }
+
+  async estimateFeeRates(
+    params?: EstimateFeeRatesRequest,
+  ): Promise<RpcResponseEnded<EstimateFeeRatesResponse>> {
+    return this.request<EstimateFeeRatesResponse>(
+      `${ApiNamespace.chain}/estimateFeeRates`,
+      params,
+    ).waitForEnd()
+  }
+
+  async estimateFee(
+    params: EstimateFeeRequest,
+  ): Promise<RpcResponseEnded<EstimateFeeResponse>> {
+    return this.request<EstimateFeeResponse>(
+      `${ApiNamespace.chain}/estimateFee`,
       params,
     ).waitForEnd()
   }
@@ -433,6 +486,28 @@ export abstract class RpcClient {
   ): Promise<RpcResponseEnded<UploadConfigResponse>> {
     return this.request<UploadConfigResponse>(
       `${ApiNamespace.config}/uploadConfig`,
+      params,
+    ).waitForEnd()
+  }
+
+  async getConsensusParameters(
+    params: GetConsensusParametersRequest = undefined,
+  ): Promise<RpcResponseEnded<GetConsensusParametersResponse>> {
+    return this.request<GetConsensusParametersResponse>(
+      `${ApiNamespace.chain}/getConsensusParameters`,
+      params,
+    ).waitForEnd()
+  }
+
+  async getAsset(params: GetAssetRequest): Promise<RpcResponseEnded<GetAssetResponse>> {
+    return this.request<GetAssetResponse>(`${ApiNamespace.chain}/getAsset`, params).waitForEnd()
+  }
+
+  async postTransaction(
+    params: PostTransactionRequest,
+  ): Promise<RpcResponseEnded<PostTransactionResponse>> {
+    return this.request<PostTransactionRequest>(
+      `${ApiNamespace.wallet}/postTransaction`,
       params,
     ).waitForEnd()
   }

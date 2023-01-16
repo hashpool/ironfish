@@ -2,7 +2,12 @@
 name = "ironfish-rust-nodejs"
 version = "0.1.0"
 license = "MPL-2.0"
-edition = "2021"
+
+[package.authors]
+workspace = true
+
+[package.edition]
+workspace = true
 
 [lib]
 crate-type = ["cdylib"]
@@ -10,15 +15,13 @@ crate-type = ["cdylib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-napi-derive = "2.2.0"
-ironfish_rust= { path = "../ironfish-rust", features = ["native"] }
+base64 = "0.13.0"
+ironfish_rust = { path = "../ironfish-rust" }
+napi-derive = "2.9.3"
 
 [dependencies.napi]
-version = "2.2.0"
+version = "2.10.4"
 features = ["napi6"]
 
 [build-dependencies]
-napi-build = "1.2.1"
-
-[patch.crates-io]
-bellman = { git = "https://github.com/iron-fish/bellman", rev = "368a62fb1821eaae495c60ada82d85faaea8b616" }
+napi-build = "2.0.1"

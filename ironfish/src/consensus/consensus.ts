@@ -2,65 +2,48 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-/**
- * The hash used in the "previousHash" field on the initial block in the
- * chain. The initial block is intentionally invalid, so we need to special
- * case it.
- */
-export const GENESIS_BLOCK_PREVIOUS = Buffer.alloc(32)
+export type ConsensusParameters = {
+  /**
+   * When adding a block, the block can be this amount of seconds into the future
+   * without rejecting it
+   */
+  allowedBlockFutureSeconds: number
 
-/**
- * The sequence of the genesis block starts at 1
- */
-export const GENESIS_BLOCK_SEQUENCE = 1
+  /**
+   * The amount of coins in the genesis block
+   */
+  genesisSupplyInIron: number
 
-/**
- * When adding a block, the block can be this amount of seconds into the future
- * without rejecting it
- */
-export const ALLOWED_BLOCK_FUTURE_SECONDS = 15
+  /**
+   * The average time that all blocks should be mined
+   */
+  targetBlockTimeInSeconds: number
 
-/**
- * The amount of coins in the genesis block
- */
-export const GENESIS_SUPPLY_IN_IRON = 42000000
+  /**
+   * The time range when difficulty and target not change
+   */
+  targetBucketTimeInSeconds: number
 
-/**
- * The oldest the tip should be before we consider the chain synced
- */
-export const MAX_SYNCED_AGE_MS = 5 * 60 * 60 * 1000
+  /**
+   * Max block size
+   */
+  maxBlockSizeBytes: number
+}
 
-/**
- * The maximum allowed requested blocks by the network
- */
-export const MAX_REQUESTED_BLOCKS = 50
+export class Consensus {
+  readonly parameters: ConsensusParameters
 
-/**
- * Max size for a message, for instance when requesting batches of blocks
- * TODO 256MB is way too big
- */
-export const MAX_MESSAGE_SIZE = 256 * 1024 * 1024
+  constructor(parameters: ConsensusParameters) {
+    this.parameters = parameters
+  }
 
-/**
- * The average time that all blocks should be mined
- *
- * NOTE: This is not used in target calculation, or IRON_FISH_YEAR_IN_BLOCKS.
- */
-export const TARGET_BLOCK_TIME_IN_SECONDS = 60
+  isActive(upgrade: number, sequence: number): boolean {
+    return sequence >= upgrade
+  }
+}
 
-/**
- * The time range when difficulty and target not change
- */
-export const TARGET_BUCKET_TIME_IN_SECONDS = 10
-
-/**
- * Graffiti sizes in bytes
- */
-export const GRAFFITI_SIZE = 32
-
-/*
- * A ratio of blocks per year that represents an approximation of how many blocks are considered a "year".
- * It's generally an approximation based on TARGET_BLOCK_TIME_IN_SECONDS second block times.
- * It's used in calculating how much a miner should get in rewards.
- */
-export const IRON_FISH_YEAR_IN_BLOCKS = (365 * 24 * 60 * 60) / TARGET_BLOCK_TIME_IN_SECONDS
+export class TestnetConsensus extends Consensus {
+  constructor(parameters: ConsensusParameters) {
+    super(parameters)
+  }
+}

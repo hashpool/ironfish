@@ -2,10 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { Note as NativeNote } from '@ironfish/rust-nodejs'
+import {
+  ASSET_ID_LENGTH,
+  MEMO_LENGTH,
+  Note as NativeNote,
+  PUBLIC_ADDRESS_LENGTH,
+  RANDOMNESS_LENGTH,
+} from '@ironfish/rust-nodejs'
 import bufio from 'bufio'
-
-export const NOTE_LENGTH = 43 + 8 + 32 + 32
+import { BufferUtils } from '../utils/buffer'
 
 export class Note {
   private readonly noteSerialized: Buffer
@@ -14,21 +19,27 @@ export class Note {
 
   private readonly _value: bigint
   private readonly _memo: Buffer
+  private readonly _assetId: Buffer
+  private readonly _sender: string
 
   constructor(noteSerialized: Buffer) {
     this.noteSerialized = noteSerialized
 
     const reader = bufio.read(this.noteSerialized, true)
 
-    // skip owner
-    reader.seek(43)
+    // skip owner public address
+    reader.seek(PUBLIC_ADDRESS_LENGTH)
 
-    this._value = BigInt(reader.readU64())
+    this._assetId = reader.readBytes(ASSET_ID_LENGTH, true)
+
+    this._value = reader.readBigU64()
 
     // skip randomness
-    reader.seek(32)
+    reader.seek(RANDOMNESS_LENGTH)
 
-    this._memo = reader.readBytes(32, true)
+    this._memo = reader.readBytes(MEMO_LENGTH, true)
+
+    this._sender = reader.readBytes(PUBLIC_ADDRESS_LENGTH, true).toString('hex')
   }
 
   serialize(): Buffer {
@@ -55,13 +66,25 @@ export class Note {
     return this._value
   }
 
+  sender(): string {
+    return this._sender
+  }
+
   memo(): string {
-    return this._memo.toString('utf8')
+    return BufferUtils.toHuman(this._memo)
+  }
+
+  assetId(): Buffer {
+    return this._assetId
   }
 
   nullifier(ownerPrivateKey: string, position: bigint): Buffer {
     const buf = this.takeReference().nullifier(ownerPrivateKey, position)
     this.returnReference()
     return buf
+  }
+
+  equals(other: Note): boolean {
+    return this.noteSerialized.equals(other.noteSerialized)
   }
 }

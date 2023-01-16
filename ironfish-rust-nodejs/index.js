@@ -11,7 +11,8 @@ function isMusl() {
   // For Node 10
   if (!process.report || typeof process.report.getReport !== 'function') {
     try {
-      return readFileSync('/usr/bin/ldd', 'utf8').includes('musl')
+      const lddPath = require('child_process').execSync('which ldd').toString().trim();
+      return readFileSync(lddPath, 'utf8').includes('musl')
     } catch (e) {
       return true
     }
@@ -101,6 +102,15 @@ switch (platform) {
     }
     break
   case 'darwin':
+    localFileExisted = existsSync(join(__dirname, 'ironfish-rust-nodejs.darwin-universal.node'))
+    try {
+      if (localFileExisted) {
+        nativeBinding = require('./ironfish-rust-nodejs.darwin-universal.node')
+      } else {
+        nativeBinding = require('@ironfish/rust-nodejs-darwin-universal')
+      }
+      break
+    } catch {}
     switch (arch) {
       case 'x64':
         localFileExisted = existsSync(join(__dirname, 'ironfish-rust-nodejs.darwin-x64.node'))
@@ -236,14 +246,41 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { NoteEncrypted, Note, TransactionPosted, Transaction, generateKey, generateNewPublicAddress, initializeSapling, FoundBlockResult, ThreadPoolHandler } = nativeBinding
+const { KEY_LENGTH, NONCE_LENGTH, BoxKeyPair, randomBytes, boxMessage, unboxMessage, RollingFilter, ASSET_ID_LENGTH, ASSET_METADATA_LENGTH, ASSET_NAME_LENGTH, ASSET_OWNER_LENGTH, ASSET_LENGTH, Asset, NOTE_ENCRYPTION_KEY_LENGTH, MAC_LENGTH, ENCRYPTED_NOTE_PLAINTEXT_LENGTH, ENCRYPTED_NOTE_LENGTH, NoteEncrypted, PUBLIC_ADDRESS_LENGTH, RANDOMNESS_LENGTH, MEMO_LENGTH, GENERATOR_LENGTH, AMOUNT_VALUE_LENGTH, DECRYPTED_NOTE_LENGTH, Note, TransactionPosted, PROOF_LENGTH, TRANSACTION_VERSION, Transaction, verifyTransactions, generateKey, generateKeyFromPrivateKey, initializeSapling, FoundBlockResult, ThreadPoolHandler, isValidPublicAddress } = nativeBinding
 
+module.exports.KEY_LENGTH = KEY_LENGTH
+module.exports.NONCE_LENGTH = NONCE_LENGTH
+module.exports.BoxKeyPair = BoxKeyPair
+module.exports.randomBytes = randomBytes
+module.exports.boxMessage = boxMessage
+module.exports.unboxMessage = unboxMessage
+module.exports.RollingFilter = RollingFilter
+module.exports.ASSET_ID_LENGTH = ASSET_ID_LENGTH
+module.exports.ASSET_METADATA_LENGTH = ASSET_METADATA_LENGTH
+module.exports.ASSET_NAME_LENGTH = ASSET_NAME_LENGTH
+module.exports.ASSET_OWNER_LENGTH = ASSET_OWNER_LENGTH
+module.exports.ASSET_LENGTH = ASSET_LENGTH
+module.exports.Asset = Asset
+module.exports.NOTE_ENCRYPTION_KEY_LENGTH = NOTE_ENCRYPTION_KEY_LENGTH
+module.exports.MAC_LENGTH = MAC_LENGTH
+module.exports.ENCRYPTED_NOTE_PLAINTEXT_LENGTH = ENCRYPTED_NOTE_PLAINTEXT_LENGTH
+module.exports.ENCRYPTED_NOTE_LENGTH = ENCRYPTED_NOTE_LENGTH
 module.exports.NoteEncrypted = NoteEncrypted
+module.exports.PUBLIC_ADDRESS_LENGTH = PUBLIC_ADDRESS_LENGTH
+module.exports.RANDOMNESS_LENGTH = RANDOMNESS_LENGTH
+module.exports.MEMO_LENGTH = MEMO_LENGTH
+module.exports.GENERATOR_LENGTH = GENERATOR_LENGTH
+module.exports.AMOUNT_VALUE_LENGTH = AMOUNT_VALUE_LENGTH
+module.exports.DECRYPTED_NOTE_LENGTH = DECRYPTED_NOTE_LENGTH
 module.exports.Note = Note
 module.exports.TransactionPosted = TransactionPosted
+module.exports.PROOF_LENGTH = PROOF_LENGTH
+module.exports.TRANSACTION_VERSION = TRANSACTION_VERSION
 module.exports.Transaction = Transaction
+module.exports.verifyTransactions = verifyTransactions
 module.exports.generateKey = generateKey
-module.exports.generateNewPublicAddress = generateNewPublicAddress
+module.exports.generateKeyFromPrivateKey = generateKeyFromPrivateKey
 module.exports.initializeSapling = initializeSapling
 module.exports.FoundBlockResult = FoundBlockResult
 module.exports.ThreadPoolHandler = ThreadPoolHandler
+module.exports.isValidPublicAddress = isValidPublicAddress

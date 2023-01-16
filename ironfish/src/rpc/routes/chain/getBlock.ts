@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 import * as yup from 'yup'
-import { GENESIS_BLOCK_SEQUENCE } from '../../../consensus'
+import { BlockSerde, GENESIS_BLOCK_SEQUENCE } from '../../../primitives/block'
 import { BlockHashSerdeInstance } from '../../../serde'
 import { ValidationError } from '../../adapters'
 import { ApiNamespace, router } from '../router'
@@ -10,7 +10,7 @@ import { ApiNamespace, router } from '../router'
 export type GetBlockRequest = { index?: number; hash?: string }
 
 interface Operation {
-  operation_identifier: { index: number; network_index: number }
+  operation_id: { index: number; network_index: number }
   type: string
 }
 interface Note {
@@ -20,7 +20,7 @@ interface Spend {
   nullifier: string
 }
 interface Transaction {
-  transaction_identifier: { hash: string }
+  transaction_id: { hash: string }
   operations: Array<Operation>
   metadata: {
     size: number
@@ -65,7 +65,7 @@ const OperationSchema = yup
   .object()
   .shape({
     type: yup.string().defined(),
-    operation_identifier: yup
+    operation_id: yup
       .object()
       .shape({
         index: yup.number().defined(),
@@ -78,7 +78,7 @@ const OperationSchema = yup
 const TransactionSchema = yup
   .object()
   .shape({
-    transaction_identifier: yup.object({ hash: yup.string().defined() }).defined(),
+    transaction_id: yup.object({ hash: yup.string().defined() }).defined(),
     operations: yup.array().of(OperationSchema).defined(),
     metadata: yup
       .object({
@@ -160,22 +160,19 @@ router.register<typeof GetBlockRequestSchema, GetBlockResponse>(
     }
 
     const transactions = block.transactions.map((transaction) => {
-      const notes = [...transaction.notes()].map((note) => ({
+      const notes = transaction.notes.map((note) => ({
         commitment: Buffer.from(note.merkleHash()).toString('hex'),
       }))
 
-      const spends = [...transaction.spends()].map((spend) => ({
+      const spends = transaction.spends.map((spend) => ({
         nullifier: BlockHashSerdeInstance.serialize(spend.nullifier),
       }))
 
-      // TODO(IRO-289) We need a better way to either serialize directly to buffer or use CBOR
-      const transactionBuffer = Buffer.from(
-        JSON.stringify(node.strategy.transactionSerde.serialize(transaction)),
-      )
+      const transactionBuffer = Buffer.from(JSON.stringify(transaction.serialize()))
 
       return {
-        transaction_identifier: {
-          hash: BlockHashSerdeInstance.serialize(transaction.unsignedHash()),
+        transaction_id: {
+          hash: BlockHashSerdeInstance.serialize(transaction.hash()),
         },
         operations: [],
         metadata: {
@@ -188,7 +185,7 @@ router.register<typeof GetBlockRequestSchema, GetBlockResponse>(
     })
 
     // TODO(IRO-289) We need a better way to either serialize directly to buffer or use CBOR
-    const blockBuffer = Buffer.from(JSON.stringify(node.strategy.blockSerde.serialize(block)))
+    const blockBuffer = Buffer.from(JSON.stringify(BlockSerde.serialize(block)))
 
     request.end({
       blockIdentifier: {

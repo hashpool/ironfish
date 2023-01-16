@@ -2,10 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import { Asset, DECRYPTED_NOTE_LENGTH } from '..'
 import {
   initializeSapling,
   generateKey,
-  generateNewPublicAddress,
+  generateKeyFromPrivateKey,
   Note,
   NoteEncrypted,
   Transaction,
@@ -28,7 +29,7 @@ describe('Demonstrate the Sapling API', () => {
 
   it('Should generate a new public address given a spending key', () => {
     const key = generateKey()
-    const newKey = generateNewPublicAddress(key.spending_key)
+    const newKey = generateKeyFromPrivateKey(key.spending_key)
 
     expect(key.incoming_view_key).toEqual(newKey.incoming_view_key)
     expect(key.outgoing_view_key).toEqual(newKey.outgoing_view_key)
@@ -39,9 +40,9 @@ describe('Demonstrate the Sapling API', () => {
   it(`Should create a miner's fee transaction`, () => {
     const key = generateKey()
 
-    const transaction = new Transaction()
-    const note = new Note(key.public_address, BigInt(20), 'test')
-    transaction.receive(key.spending_key, note)
+    const transaction = new Transaction(key.spending_key)
+    const note = new Note(key.public_address, BigInt(20), 'test', Asset.nativeId(), key.public_address)
+    transaction.receive(note)
 
     const serializedPostedTransaction = transaction.post_miners_fee()
     const postedTransaction = new TransactionPosted(serializedPostedTransaction)
@@ -59,12 +60,12 @@ describe('Demonstrate the Sapling API', () => {
 
     const decryptedNoteBuffer = encryptedNote.decryptNoteForOwner(key.incoming_view_key)
     expect(decryptedNoteBuffer).toBeInstanceOf(Buffer)
-    expect(decryptedNoteBuffer.byteLength).toBe(115)
+    expect(decryptedNoteBuffer!.byteLength).toBe(DECRYPTED_NOTE_LENGTH)
 
     const decryptedSpenderNote = encryptedNote.decryptNoteForSpender(key.outgoing_view_key)
     expect(decryptedSpenderNote).toBe(null)
 
-    const decryptedNote = Note.deserialize(decryptedNoteBuffer)
+    const decryptedNote = Note.deserialize(decryptedNoteBuffer!)
 
     // Null characters are included in the memo string
     expect(decryptedNote.memo().replace(/\0/g, '')).toEqual('test')
@@ -76,17 +77,17 @@ describe('Demonstrate the Sapling API', () => {
     const key = generateKey()
     const recipientKey = generateKey()
 
-    const minersFeeTransaction = new Transaction()
-    const minersFeeNote = new Note(key.public_address, BigInt(20), 'miner')
-    minersFeeTransaction.receive(key.spending_key, minersFeeNote)
+    const minersFeeTransaction = new Transaction(key.spending_key)
+    const minersFeeNote = new Note(key.public_address, BigInt(20), 'miner', Asset.nativeId(), key.public_address)
+    minersFeeTransaction.receive(minersFeeNote)
 
     const postedMinersFeeTransaction = new TransactionPosted(minersFeeTransaction.post_miners_fee())
 
-    const transaction = new Transaction()
-    transaction.setExpirationSequence(10)
+    const transaction = new Transaction(key.spending_key)
+    transaction.setExpiration(10)
     const encryptedNote = new NoteEncrypted(postedMinersFeeTransaction.getNote(0))
-    const decryptedNote = Note.deserialize(encryptedNote.decryptNoteForOwner(key.incoming_view_key))
-    const newNote = new Note(recipientKey.public_address, BigInt(15), 'receive')
+    const decryptedNote = Note.deserialize(encryptedNote.decryptNoteForOwner(key.incoming_view_key)!)
+    const newNote = new Note(recipientKey.public_address, BigInt(15), 'receive', Asset.nativeId(), minersFeeNote.owner())
 
     let currentHash = encryptedNote.merkleHash()
     let authPath = Array.from({ length: 32 }, (_, depth) => {
@@ -106,12 +107,12 @@ describe('Demonstrate the Sapling API', () => {
       serializeRootHash: () => currentHash,
     }
 
-    transaction.spend(key.spending_key, decryptedNote, witness)
-    transaction.receive(key.spending_key, newNote)
+    transaction.spend(decryptedNote, witness)
+    transaction.receive(newNote)
 
-    const postedTransaction = new TransactionPosted(transaction.post(key.spending_key, key.public_address, BigInt(5)))
+    const postedTransaction = new TransactionPosted(transaction.post(key.public_address, BigInt(5)))
 
-    expect(postedTransaction.expirationSequence()).toEqual(10)
+    expect(postedTransaction.expiration()).toEqual(10)
     expect(postedTransaction.fee()).toEqual(BigInt(5))
     expect(postedTransaction.notesLength()).toEqual(1)
     expect(postedTransaction.spendsLength()).toEqual(1)

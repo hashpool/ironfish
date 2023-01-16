@@ -3,55 +3,97 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { BufferMap } from 'buffer-map'
-import FastPriorityQueue from 'fastpriorityqueue'
 import { Assert } from '../assert'
 import { Blockchain } from '../blockchain'
+import { isExpiredSequence } from '../consensus'
 import { createRootLogger, Logger } from '../logger'
 import { MetricsMonitor } from '../metrics'
+import { getTransactionSize } from '../network/utils/serializers'
 import { Block, BlockHeader } from '../primitives'
 import { Transaction, TransactionHash } from '../primitives/transaction'
+import { FeeEstimator, getFeeRate } from './feeEstimator'
+import { PriorityQueue } from './priorityQueue'
 
 interface MempoolEntry {
-  fee: bigint
+  hash: TransactionHash
+  feeRate: bigint
+}
+
+interface ExpirationMempoolEntry {
+  expiration: number
   hash: TransactionHash
 }
 
 export class MemPool {
   private readonly transactions = new BufferMap<Transaction>()
+  /* Keep track of number of bytes stored in the transaction map */
+  private transactionsBytes = 0
   private readonly nullifiers = new BufferMap<Buffer>()
-  private readonly queue: FastPriorityQueue<MempoolEntry>
+
+  private readonly queue: PriorityQueue<MempoolEntry>
+  private readonly expirationQueue: PriorityQueue<ExpirationMempoolEntry>
+
   head: BlockHeader | null
 
   private readonly chain: Blockchain
   private readonly logger: Logger
   private readonly metrics: MetricsMonitor
 
-  constructor(options: { chain: Blockchain; metrics: MetricsMonitor; logger?: Logger }) {
+  readonly feeEstimator: FeeEstimator
+
+  constructor(options: {
+    chain: Blockchain
+    feeEstimator: FeeEstimator
+    metrics: MetricsMonitor
+    logger?: Logger
+  }) {
     const logger = options.logger || createRootLogger()
 
     this.head = null
-    this.queue = new FastPriorityQueue<MempoolEntry>((firstTransaction, secondTransaction) => {
-      if (firstTransaction.fee === secondTransaction.fee) {
+
+    this.queue = new PriorityQueue<MempoolEntry>(
+      (firstTransaction, secondTransaction) => {
+        if (firstTransaction.feeRate !== secondTransaction.feeRate) {
+          return firstTransaction.feeRate > secondTransaction.feeRate
+        }
+
         return firstTransaction.hash.compare(secondTransaction.hash) > 0
-      }
-      return firstTransaction.fee > secondTransaction.fee
-    })
+      },
+      (t) => t.hash.toString('hex'),
+    )
+
+    this.expirationQueue = new PriorityQueue<ExpirationMempoolEntry>(
+      (t1, t2) => t1.expiration < t2.expiration,
+      (t) => t.hash.toString('hex'),
+    )
 
     this.chain = options.chain
     this.logger = logger.withTag('mempool')
     this.metrics = options.metrics
 
+    this.feeEstimator = options.feeEstimator
+
     this.chain.onConnectBlock.on((block) => {
+      this.feeEstimator.onConnectBlock(block, this)
       this.onConnectBlock(block)
     })
 
     this.chain.onDisconnectBlock.on(async (block) => {
+      this.feeEstimator.onDisconnectBlock(block)
       await this.onDisconnectBlock(block)
     })
   }
 
-  size(): number {
+  async start(): Promise<void> {
+    await this.feeEstimator.init(this.chain)
+  }
+
+  count(): number {
     return this.transactions.size
+  }
+
+  sizeBytes(): number {
+    return this.transactionsBytes
   }
 
   exists(hash: TransactionHash): boolean {
@@ -69,8 +111,9 @@ export class MemPool {
   *orderedTransactions(): Generator<Transaction, void, unknown> {
     const clone = this.queue.clone()
 
-    while (!clone.isEmpty()) {
+    while (clone.size() > 0) {
       const feeAndHash = clone.poll()
+
       Assert.isNotUndefined(feeAndHash)
       const transaction = this.transactions.get(feeAndHash.hash)
 
@@ -87,37 +130,19 @@ export class MemPool {
   /**
    * Accepts a transaction from the network
    */
-  async acceptTransaction(transaction: Transaction, shouldVerify = true): Promise<boolean> {
+  acceptTransaction(transaction: Transaction): boolean {
     const hash = transaction.hash().toString('hex')
-    const sequence = transaction.expirationSequence()
-
+    const sequence = transaction.expiration()
     if (this.exists(transaction.hash())) {
       return false
     }
 
-    const isExpiredSequence = this.chain.verifier.isExpiredSequence(
-      sequence,
-      this.chain.head.sequence,
-    )
-
-    if (isExpiredSequence) {
+    if (isExpiredSequence(sequence, this.chain.head.sequence)) {
       this.logger.debug(`Invalid transaction '${hash}': expired sequence ${sequence}`)
       return false
     }
 
-    if (shouldVerify) {
-      const { valid, reason } = await this.chain.verifier.verifyTransactionNoncontextual(
-        transaction,
-      )
-
-      if (!valid) {
-        Assert.isNotUndefined(reason)
-        this.logger.debug(`Invalid transaction '${hash}': ${reason}`)
-        return false
-      }
-    }
-
-    for (const spend of transaction.spends()) {
+    for (const spend of transaction.spends) {
       if (this.nullifiers.has(spend.nullifier)) {
         const existingTransactionHash = this.nullifiers.get(spend.nullifier)
         Assert.isNotUndefined(existingTransactionHash)
@@ -137,7 +162,7 @@ export class MemPool {
 
     this.addTransaction(transaction)
 
-    this.logger.debug(`Accepted tx ${hash}, poolsize ${this.size()}`)
+    this.logger.debug(`Accepted tx ${hash}, poolsize ${this.count()}`)
     return true
   }
 
@@ -151,18 +176,19 @@ export class MemPool {
       }
     }
 
-    for (const transaction of this.transactions.values()) {
-      const isExpired = this.chain.verifier.isExpiredSequence(
-        transaction.expirationSequence(),
-        this.chain.head.sequence,
-      )
-
-      if (isExpired) {
-        const didDelete = this.deleteTransaction(transaction)
-        if (didDelete) {
-          deletedTransactions++
-        }
+    let nextExpired = this.expirationQueue.peek()
+    while (nextExpired && isExpiredSequence(nextExpired.expiration, this.chain.head.sequence)) {
+      const transaction = this.get(nextExpired.hash)
+      if (!transaction) {
+        continue
       }
+
+      const didDelete = this.deleteTransaction(transaction)
+      if (didDelete) {
+        deletedTransactions++
+      }
+
+      nextExpired = this.expirationQueue.peek()
     }
 
     if (deletedTransactions) {
@@ -176,16 +202,14 @@ export class MemPool {
     let addedTransactions = 0
 
     for (const transaction of block.transactions) {
-      if (this.exists(transaction.hash())) {
-        continue
-      }
-
       if (transaction.isMinersFee()) {
         continue
       }
 
-      this.addTransaction(transaction)
-      addedTransactions++
+      const added = this.addTransaction(transaction)
+      if (added) {
+        addedTransactions++
+      }
     }
 
     this.logger.debug(`Added ${addedTransactions} transactions`)
@@ -193,31 +217,47 @@ export class MemPool {
     this.head = await this.chain.getHeader(block.header.previousBlockHash)
   }
 
-  private addTransaction(transaction: Transaction): void {
+  private addTransaction(transaction: Transaction): boolean {
     const hash = transaction.hash()
-    this.transactions.set(hash, transaction)
 
-    for (const spend of transaction.spends()) {
-      this.nullifiers.set(spend.nullifier, hash)
+    if (this.transactions.has(hash)) {
+      return false
     }
 
-    this.queue.add({ fee: transaction.fee(), hash })
-    this.metrics.memPoolSize.value = this.size()
+    this.transactions.set(hash, transaction)
+
+    this.transactionsBytes += getTransactionSize(transaction)
+
+    for (const spend of transaction.spends) {
+      if (!this.nullifiers.has(spend.nullifier)) {
+        this.nullifiers.set(spend.nullifier, hash)
+      }
+    }
+
+    this.queue.add({ hash, feeRate: getFeeRate(transaction) })
+    this.expirationQueue.add({ expiration: transaction.expiration(), hash })
+    this.metrics.memPoolSize.value = this.count()
+    return true
   }
 
   private deleteTransaction(transaction: Transaction): boolean {
     const hash = transaction.hash()
-    this.transactions.delete(hash)
+    const deleted = this.transactions.delete(hash)
 
-    for (const spend of transaction.spends()) {
+    if (!deleted) {
+      return false
+    }
+
+    this.transactionsBytes -= getTransactionSize(transaction)
+
+    for (const spend of transaction.spends) {
       this.nullifiers.delete(spend.nullifier)
     }
 
-    const entry = this.queue.removeOne((t) => t.hash.equals(hash))
-    if (!entry) {
-      return false
-    }
-    this.metrics.memPoolSize.value = this.size()
+    this.queue.remove(hash.toString('hex'))
+    this.expirationQueue.remove(hash.toString('hex'))
+
+    this.metrics.memPoolSize.value = this.count()
     return true
   }
 }

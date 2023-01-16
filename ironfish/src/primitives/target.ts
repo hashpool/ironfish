@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-import { TARGET_BLOCK_TIME_IN_SECONDS, TARGET_BUCKET_TIME_IN_SECONDS } from '../consensus'
 import { BigIntUtils } from '../utils/bigint'
 
 /**
@@ -32,7 +31,9 @@ export class Target {
       this.targetValue = BigInt(0)
     } else {
       const candidate =
-        targetValue instanceof Buffer ? BigIntUtils.fromBytes(targetValue) : BigInt(targetValue)
+        targetValue instanceof Buffer
+          ? BigIntUtils.fromBytesBE(targetValue)
+          : BigInt(targetValue)
 
       if (candidate > MAX_256_BIT_NUM) {
         throw new Error('Target value exceeds max target')
@@ -58,7 +59,7 @@ export class Target {
 
   /**
    * Calculate the target for the current block given the timestamp in that
-   * block's header, the pervious block's timestamp and previous block's target.
+   * block's header, the previous block's timestamp and previous block's target.
    *
    * To verify whether a target on a block is correct, pass in the timestamp in its header,
    * its previous block's timestamp, and its previous block's target
@@ -72,6 +73,8 @@ export class Target {
     time: Date,
     previousBlockTimestamp: Date,
     previousBlockTarget: Target,
+    targetBlockTimeInSeconds: number,
+    targetBucketTimeInSeconds: number,
   ): Target {
     const parentDifficulty = previousBlockTarget.toDifficulty()
 
@@ -79,6 +82,8 @@ export class Target {
       time,
       previousBlockTimestamp,
       parentDifficulty,
+      targetBlockTimeInSeconds,
+      targetBucketTimeInSeconds,
     )
 
     return Target.fromDifficulty(difficulty)
@@ -101,7 +106,7 @@ export class Target {
    * .. and so on
    *
    * Returns the difficulty for a block given it timestamp for that block and its parent.
-   * @param time the block's timestamp for which the target is calcualted for
+   * @param time the block's timestamp for which the target is calculated for
    * @param previousBlockTimestamp the block's previous block header's timestamp
    * @param previousBlockTarget the block's previous block header's target
    */
@@ -109,14 +114,14 @@ export class Target {
     time: Date,
     previousBlockTimestamp: Date,
     previousBlockDifficulty: bigint,
+    targetBlockTimeInSeconds: number,
+    targetBucketTimeInSeconds: number,
   ): bigint {
     const diffInSeconds = (time.getTime() - previousBlockTimestamp.getTime()) / 1000
 
     let bucket = Math.floor(
-      (diffInSeconds -
-        TARGET_BLOCK_TIME_IN_SECONDS +
-        Math.floor(TARGET_BUCKET_TIME_IN_SECONDS / 2)) /
-        TARGET_BUCKET_TIME_IN_SECONDS,
+      (diffInSeconds - targetBlockTimeInSeconds + Math.floor(targetBucketTimeInSeconds / 2)) /
+        targetBucketTimeInSeconds,
     )
 
     // Should not change difficulty by more than 99 buckets from last block's difficulty
@@ -154,7 +159,7 @@ export class Target {
   }
 
   /**
-   * Add the given amout to the target's value. A negative amount makes the target
+   * Add the given amount to the target's value. A negative amount makes the target
    * harder to achieve, a positive one makes it easier.
    *
    * If adjustment would make target negative or higher than max allowed value,

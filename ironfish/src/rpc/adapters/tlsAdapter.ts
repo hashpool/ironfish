@@ -1,11 +1,13 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+import { randomBytes } from 'crypto'
 import net from 'net'
 import { pki } from 'node-forge'
 import tls from 'tls'
 import { FileSystem } from '../../fileSystems'
 import { createRootLogger, Logger } from '../../logger'
+import { IronfishNode } from '../../node'
 import { ApiNamespace } from '../routes'
 import { RpcSocketAdapter } from './socketAdapter/socketAdapter'
 
@@ -13,6 +15,7 @@ export class RpcTlsAdapter extends RpcSocketAdapter {
   readonly fileSystem: FileSystem
   readonly nodeKeyPath: string
   readonly nodeCertPath: string
+  node: IronfishNode
 
   constructor(
     host: string,
@@ -20,13 +23,16 @@ export class RpcTlsAdapter extends RpcSocketAdapter {
     fileSystem: FileSystem,
     nodeKeyPath: string,
     nodeCertPath: string,
+    node: IronfishNode,
     logger: Logger = createRootLogger(),
     namespaces: ApiNamespace[],
   ) {
-    super(host, port, logger, namespaces)
+    super({ host, port }, logger, namespaces)
     this.fileSystem = fileSystem
     this.nodeKeyPath = nodeKeyPath
     this.nodeCertPath = nodeCertPath
+    this.node = node
+    this.enableAuthentication = true
   }
 
   protected async createServer(): Promise<net.Server> {
@@ -37,6 +43,16 @@ export class RpcTlsAdapter extends RpcSocketAdapter {
   protected async getTlsOptions(): Promise<tls.TlsOptions> {
     const nodeKeyExists = await this.fileSystem.exists(this.nodeKeyPath)
     const nodeCertExists = await this.fileSystem.exists(this.nodeCertPath)
+    const rpcAuthToken = this.node.internal.get('rpcAuthToken')
+
+    if (!rpcAuthToken || rpcAuthToken === '') {
+      this.logger.debug(
+        `Missing RPC Auth token in internal.json config. Automatically generating auth token.`,
+      )
+      const newPassword = randomBytes(32).toString('hex')
+      this.node.internal.set('rpcAuthToken', newPassword)
+      await this.node.internal.save()
+    }
 
     if (!nodeKeyExists || !nodeCertExists) {
       this.logger.debug(
@@ -62,10 +78,10 @@ export class RpcTlsAdapter extends RpcSocketAdapter {
     const nodeCertPem = pki.certificateToPem(cert)
 
     const nodeKeyDir = this.fileSystem.dirname(this.nodeKeyPath)
-    const nodeCertPath = this.fileSystem.dirname(this.nodeCertPath)
+    const nodeCertDir = this.fileSystem.dirname(this.nodeCertPath)
 
     await this.fileSystem.mkdir(nodeKeyDir, { recursive: true })
-    await this.fileSystem.mkdir(nodeCertPath, { recursive: true })
+    await this.fileSystem.mkdir(nodeCertDir, { recursive: true })
 
     await this.fileSystem.writeFile(this.nodeKeyPath, nodeKeyPem)
     await this.fileSystem.writeFile(this.nodeCertPath, nodeCertPem)

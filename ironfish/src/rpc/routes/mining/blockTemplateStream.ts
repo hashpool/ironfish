@@ -20,24 +20,11 @@ export const BlockTemplateStreamResponseSchema: yup.ObjectSchema<BlockTemplateSt
         .object({
           sequence: yup.number().required(),
           previousBlockHash: yup.string().required(),
-          noteCommitment: yup
-            .object({
-              commitment: yup.string().required(),
-              size: yup.number().required(),
-            })
-            .required()
-            .defined(),
-          nullifierCommitment: yup
-            .object({
-              commitment: yup.string().required(),
-              size: yup.number().required(),
-            })
-            .required()
-            .defined(),
+          noteCommitment: yup.string().required(),
+          transactionCommitment: yup.string().required(),
           target: yup.string().required(),
           randomness: yup.string().required(),
           timestamp: yup.number().required(),
-          minersFee: yup.string().required(),
           graffiti: yup.string().required(),
         })
         .required()
@@ -66,12 +53,12 @@ router.register<typeof BlockTemplateStreamRequestSchema, BlockTemplateStreamResp
 
     // Construct a new block template and send it to the stream listener
     const streamNewBlockTemplate = async (block: Block) => {
-      // If we mine when were not synced when we will mine a fork no one cares about
+      // If we mine when we're not synced, then we will mine a fork no one cares about
       if (!node.chain.synced && !node.config.get('miningForce')) {
         return
       }
 
-      // If we mine when were not connected to anyone, then no one will get our blocks
+      // If we mine when we're not connected to anyone, then no one will get our blocks
       if (!node.peerNetwork.isReady && !node.config.get('miningForce')) {
         return
       }
@@ -84,9 +71,14 @@ router.register<typeof BlockTemplateStreamRequestSchema, BlockTemplateStreamResp
         serializedBlock = await node.miningManager.createNewBlockTemplate(block)
       } catch (e) {
         const message = e instanceof Error ? e.message : 'Unknown Error'
-        node.logger.debug(`Failed to create new block template: ${message}`)
+        node.logger.debug(
+          `Failed to create new block template for sequence ${
+            block.header.sequence + 1
+          }: ${message}`,
+        )
         return
       }
+
       request.stream(serializedBlock)
     }
 

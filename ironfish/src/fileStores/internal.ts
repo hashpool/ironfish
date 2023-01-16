@@ -8,12 +8,16 @@ export type InternalOptions = {
   isFirstRun: boolean
   networkIdentity: string
   telemetryNodeId: string
+  rpcAuthToken: string
+  networkId: number
 }
 
 export const InternalOptionsDefaults: InternalOptions = {
   isFirstRun: true,
   networkIdentity: '',
   telemetryNodeId: '',
+  rpcAuthToken: '',
+  networkId: 0,
 }
 
 export class InternalStore extends KeyStore<InternalOptions> {

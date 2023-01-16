@@ -2,42 +2,56 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 import net from 'net'
-import { IpcClient } from 'node-ipc'
 import { Assert } from '../../assert'
 import { Event } from '../../event'
-import { PromiseUtils, SetTimeoutToken, YupUtils } from '../../utils'
-import { IpcErrorSchema, IpcResponseSchema, IpcStreamSchema } from '../adapters'
+import { createRootLogger, Logger } from '../../logger'
+import { ErrorUtils, PromiseUtils, SetTimeoutToken, YupUtils } from '../../utils'
+import {
+  MESSAGE_DELIMITER,
+  ServerSocketRpc,
+  ServerSocketRpcSchema,
+  SocketRpcErrorSchema,
+  SocketRpcResponseSchema,
+  SocketRpcStreamSchema,
+} from '../adapters'
+import { MessageBuffer } from '../messageBuffer'
 import { isRpcResponseError, RpcResponse } from '../response'
 import { Stream } from '../stream'
 import { RpcClient } from './client'
-import { RequestTimeoutError, RpcConnectionError, RpcRequestError } from './errors'
+import {
+  RequestTimeoutError,
+  RpcConnectionError,
+  RpcConnectionLostError,
+  RpcConnectionRefusedError,
+  RpcRequestError,
+} from './errors'
 
-const REQUEST_TIMEOUT_MS = null
-
-export type RpcClientConnectionInfo =
-  | {
-      mode: 'ipc'
-      socketPath: string
-    }
-  | {
-      mode: 'tcp'
-      host: string
-      port: number
-    }
+export type RpcSocketClientConnectionInfo = {
+  path?: string
+  host?: string
+  port?: number
+}
 
 export abstract class RpcSocketClient extends RpcClient {
-  abstract client: IpcClient | net.Socket | null
-  abstract isConnected: boolean
-  abstract connection: Partial<RpcClientConnectionInfo>
+  readonly onClose = new Event<[]>()
+  readonly connectTo: RpcSocketClientConnectionInfo
+  readonly authToken: string | null = null
+  readonly messageBuffer: MessageBuffer
 
-  abstract connect(options?: Record<string, unknown>): Promise<void>
-  abstract close(): void
-  protected abstract send(messageId: number, route: string, data: unknown): void
+  client: net.Socket | null = null
+  isConnected = false
 
-  timeoutMs: number | null = REQUEST_TIMEOUT_MS
-  messageIds = 0
+  constructor(connectTo: RpcSocketClientConnectionInfo, logger?: Logger, authToken?: string) {
+    super(logger ?? createRootLogger())
+    this.connectTo = connectTo
+    this.authToken = authToken ?? null
+    this.messageBuffer = new MessageBuffer()
+  }
 
-  pending = new Map<
+  private timeoutMs: number | null = null
+  private messageIds = 0
+
+  private pending = new Map<
     number,
     {
       response: RpcResponse<unknown>
@@ -49,7 +63,62 @@ export abstract class RpcSocketClient extends RpcClient {
     }
   >()
 
-  onClose = new Event<[]>()
+  async connect(): Promise<void> {
+    return new Promise((resolve, reject): void => {
+      const onConnect = () => {
+        client.off('connect', onConnect)
+        client.off('error', onError)
+        this.onConnect()
+        resolve()
+      }
+
+      const onError = (error: unknown) => {
+        client.off('connect', onConnect)
+        client.off('error', onError)
+
+        if (ErrorUtils.isConnectRefusedError(error) || ErrorUtils.isNoEntityError(error)) {
+          reject(new RpcConnectionRefusedError())
+        } else if (
+          ErrorUtils.isConnectTimeOutError(error) ||
+          ErrorUtils.isConnectResetError(error)
+        ) {
+          reject(new RpcConnectionLostError())
+        } else {
+          reject(error)
+        }
+      }
+
+      const options =
+        this.connectTo.path !== undefined
+          ? { path: this.connectTo.path }
+          : this.connectTo.port !== undefined
+          ? { port: this.connectTo.port, host: this.connectTo.host }
+          : null
+
+      Assert.isNotNull(options)
+
+      if (process.platform === 'win32') {
+        // Windows requires special socket paths. See this for more info:
+        // https://nodejs.org/api/net.html#identifying-paths-for-ipc-connections
+        if (options.path && !options.path.startsWith('\\\\.\\pipe\\')) {
+          options.path = options.path.replace(/^\//, '')
+          options.path = options.path.replace(/\//g, '-')
+          options.path = `\\\\.\\pipe\\${options.path}`
+        }
+      }
+
+      this.logger.debug(`Connecting to ${this.describe()}`)
+      const client = net.connect(options)
+      client.on('error', onError)
+      client.on('connect', onConnect)
+      this.client = client
+    })
+  }
+
+  close(): void {
+    this.client?.destroy()
+    this.messageBuffer.clear()
+  }
 
   async tryConnect(): Promise<boolean> {
     return this.connect()
@@ -103,7 +172,7 @@ export abstract class RpcSocketClient extends RpcClient {
       if (timeout) {
         clearTimeout(timeout)
       }
-      stream.close()
+      stream.close(...args)
       reject(...args)
     }
 
@@ -120,13 +189,32 @@ export abstract class RpcSocketClient extends RpcClient {
 
     this.pending.set(messageId, pending)
 
-    this.send(messageId, route, data)
+    this.send(messageId, route, data, this.authToken)
 
     return response
   }
 
+  protected send(
+    messageId: number,
+    route: string,
+    data: unknown,
+    authToken: string | null,
+  ): void {
+    Assert.isNotNull(this.client)
+    const message = {
+      type: 'message',
+      data: {
+        mid: messageId,
+        type: route,
+        auth: authToken,
+        data: data,
+      },
+    }
+    this.client.write(JSON.stringify(message) + MESSAGE_DELIMITER)
+  }
+
   protected handleStream = async (data: unknown): Promise<void> => {
-    const { result, error } = await YupUtils.tryValidate(IpcStreamSchema, data)
+    const { result, error } = await YupUtils.tryValidate(SocketRpcStreamSchema, data)
     if (!result) {
       throw error
     }
@@ -139,8 +227,23 @@ export abstract class RpcSocketClient extends RpcClient {
     pending.stream.write(result.data)
   }
 
+  /*
+   * Should be called by all implementers when the connection is closed by the other side (server).
+   * This cleans up all the pending requests by rejecting them with a RpcConnectionLostError
+   *
+   * TODO: we should probably also have a cleanup function for when the client closes itself
+   */
+  protected handleClose = (): void => {
+    for (const request of this.pending.values()) {
+      request.reject(new RpcConnectionLostError(request.type))
+    }
+
+    this.pending.clear()
+    this.onClose.emit()
+  }
+
   protected handleEnd = async (data: unknown): Promise<void> => {
-    const { result, error } = await YupUtils.tryValidate(IpcResponseSchema, data)
+    const { result, error } = await YupUtils.tryValidate(SocketRpcResponseSchema, data)
     if (!result) {
       throw error
     }
@@ -154,7 +257,7 @@ export abstract class RpcSocketClient extends RpcClient {
 
     if (isRpcResponseError(pending.response)) {
       const { result: errorBody, error: errorError } = await YupUtils.tryValidate(
-        IpcErrorSchema,
+        SocketRpcErrorSchema,
         result.data,
       )
 
@@ -176,5 +279,87 @@ export abstract class RpcSocketClient extends RpcClient {
     }
 
     pending.resolve(result.data)
+  }
+
+  protected onConnect(): void {
+    Assert.isNotNull(this.client)
+    this.isConnected = true
+    this.client.on('data', this.onClientData)
+    this.client.on('close', this.onClientClose)
+  }
+
+  protected onClientData = (data: Buffer): void =>
+    void this.onData(data).catch((e) => this.onError(e))
+
+  protected onData = async (data: Buffer): Promise<void> => {
+    this.messageBuffer.write(data)
+
+    for (const message of this.messageBuffer.readMessages()) {
+      const { result, error } = await YupUtils.tryValidate(
+        ServerSocketRpcSchema,
+        JSON.parse(message),
+      )
+      if (!result) {
+        throw error
+      }
+      const { type, data }: ServerSocketRpc = result
+      switch (type) {
+        case 'message': {
+          this.onMessage(data)
+          break
+        }
+        case 'stream': {
+          this.onStream(data)
+          break
+        }
+        case 'error':
+        case 'malformedRequest': {
+          this.onError(data)
+          break
+        }
+      }
+    }
+  }
+
+  protected onClientClose = (): void => {
+    this.isConnected = false
+    this.messageBuffer.clear()
+
+    if (this.client) {
+      this.client.off('data', this.onClientData)
+      this.client.off('close', this.onClientClose)
+      this.client = null
+    }
+
+    for (const request of this.pending.values()) {
+      request.reject(new RpcConnectionLostError(request.type))
+    }
+
+    this.pending.clear()
+    this.onClose.emit()
+  }
+
+  protected onMessage = (data: unknown): void => {
+    this.handleEnd(data).catch((e) => this.onError(e))
+  }
+
+  protected onStream = (data: unknown): void => {
+    this.handleStream(data).catch((e) => this.onError(e))
+  }
+
+  protected onError(error: unknown): void {
+    this.logger.error(ErrorUtils.renderError(error))
+  }
+
+  describe(): string {
+    if (this.connectTo.path) {
+      return this.connectTo.path
+    }
+
+    if (this.connectTo.host && this.connectTo.port) {
+      return `${this.connectTo.host}:${this.connectTo.port}`
+    }
+
+    return 'invalid'
   }
 }

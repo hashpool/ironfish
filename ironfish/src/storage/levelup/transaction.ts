@@ -5,12 +5,13 @@ import type { LevelupDatabase } from './database'
 import type { LevelupStore } from './store'
 import { MutexUnlockFunction } from '../../mutex'
 import {
-  BUFFER_TO_STRING_ENCODING,
+  BufferToStringEncoding,
   DatabaseSchema,
   DuplicateKeyError,
   IDatabaseTransaction,
   SchemaKey,
   SchemaValue,
+  TransactionWrongDatabaseError,
 } from '../database'
 import { LevelupBatch } from './batch'
 
@@ -76,10 +77,11 @@ export class LevelupTransaction implements IDatabaseTransaction {
     key: SchemaKey<Schema>,
   ): Promise<SchemaValue<Schema> | undefined> {
     await this.acquireLock()
+    this.assertIsSameDatabase(store)
     this.assertCanRead()
 
     const [encodedKey] = store.encode(key)
-    const cacheKey = BUFFER_TO_STRING_ENCODING.serialize(encodedKey)
+    const cacheKey = BufferToStringEncoding.serialize(encodedKey)
 
     if (this.cacheDelete.has(cacheKey)) {
       return undefined
@@ -101,10 +103,11 @@ export class LevelupTransaction implements IDatabaseTransaction {
     value: SchemaValue<Schema>,
   ): Promise<void> {
     await this.acquireLock()
+    this.assertIsSameDatabase(store)
     this.assertCanWrite()
 
     const [encodedKey, encodedValue] = store.encode(key, value)
-    const cacheKey = BUFFER_TO_STRING_ENCODING.serialize(encodedKey)
+    const cacheKey = BufferToStringEncoding.serialize(encodedKey)
 
     this.batch.putEncoded(encodedKey, encodedValue)
     this.cache.set(cacheKey, value)
@@ -117,6 +120,7 @@ export class LevelupTransaction implements IDatabaseTransaction {
     value: SchemaValue<Schema>,
   ): Promise<void> {
     await this.acquireLock()
+    this.assertIsSameDatabase(store)
     this.assertCanWrite()
 
     if (await this.has(store, key)) {
@@ -124,7 +128,7 @@ export class LevelupTransaction implements IDatabaseTransaction {
     }
 
     const [encodedKey, encodedValue] = store.encode(key, value)
-    const cacheKey = BUFFER_TO_STRING_ENCODING.serialize(encodedKey)
+    const cacheKey = BufferToStringEncoding.serialize(encodedKey)
     this.batch.putEncoded(encodedKey, encodedValue)
     this.cache.set(cacheKey, value)
     this.cacheDelete.delete(cacheKey)
@@ -135,10 +139,11 @@ export class LevelupTransaction implements IDatabaseTransaction {
     key: SchemaKey<Schema>,
   ): Promise<void> {
     await this.acquireLock()
+    this.assertIsSameDatabase(store)
     this.assertCanWrite()
 
     const [encodedKey] = store.encode(key)
-    const cacheKey = BUFFER_TO_STRING_ENCODING.serialize(encodedKey)
+    const cacheKey = BufferToStringEncoding.serialize(encodedKey)
     this.batch.delEncoded(encodedKey)
     this.cache.set(cacheKey, undefined)
     this.cacheDelete.add(cacheKey)
@@ -168,6 +173,14 @@ export class LevelupTransaction implements IDatabaseTransaction {
     this.aborting = true
     this.releaseLock()
     return Promise.resolve()
+  }
+
+  private assertIsSameDatabase<Schema extends DatabaseSchema>(
+    store: LevelupStore<Schema>,
+  ): void {
+    if (store.db !== this.db) {
+      throw new TransactionWrongDatabaseError(store.name)
+    }
   }
 
   private assertCanRead(): void {

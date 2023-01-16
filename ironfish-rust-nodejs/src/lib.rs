@@ -2,15 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::fmt::Display;
+
+use ironfish_rust::PublicAddress;
 use ironfish_rust::SaplingKey;
 use napi::bindgen_prelude::*;
-use napi::Error;
 use napi_derive::napi;
 
 use ironfish_rust::mining;
 use ironfish_rust::sapling_bls12;
 
+pub mod nacl;
+pub mod rolling_filter;
 pub mod structs;
+
+fn to_napi_err(err: impl Display) -> napi::Error {
+    Error::from_reason(err.to_string())
+}
 
 #[napi(object)]
 pub struct Key {
@@ -32,20 +40,19 @@ pub fn generate_key() -> Key {
         spending_key: sapling_key.hex_spending_key(),
         incoming_view_key: sapling_key.incoming_view_key().hex_key(),
         outgoing_view_key: sapling_key.outgoing_view_key().hex_key(),
-        public_address: sapling_key.generate_public_address().hex_public_address(),
+        public_address: sapling_key.public_address().hex_public_address(),
     }
 }
 
 #[napi]
-pub fn generate_new_public_address(private_key: String) -> Result<Key> {
-    let sapling_key =
-        SaplingKey::from_hex(&private_key).map_err(|err| Error::from_reason(err.to_string()))?;
+pub fn generate_key_from_private_key(private_key: String) -> Result<Key> {
+    let sapling_key = SaplingKey::from_hex(&private_key).map_err(to_napi_err)?;
 
     Ok(Key {
         spending_key: sapling_key.hex_spending_key(),
         incoming_view_key: sapling_key.incoming_view_key().hex_key(),
         outgoing_view_key: sapling_key.outgoing_view_key().hex_key(),
-        public_address: sapling_key.generate_public_address().hex_public_address(),
+        public_address: sapling_key.public_address().hex_public_address(),
     })
 }
 
@@ -61,14 +68,12 @@ pub struct FoundBlockResult {
 }
 
 #[napi]
-struct ThreadPoolHandler {
-    #[allow(dead_code)]
+pub struct ThreadPoolHandler {
     threadpool: mining::threadpool::ThreadPool,
 }
 #[napi]
 impl ThreadPoolHandler {
     #[napi(constructor)]
-    #[allow(dead_code)]
     pub fn new(thread_count: u32, batch_size: u32) -> Self {
         ThreadPoolHandler {
             threadpool: mining::threadpool::ThreadPool::new(thread_count as usize, batch_size),
@@ -76,26 +81,22 @@ impl ThreadPoolHandler {
     }
 
     #[napi]
-    #[allow(dead_code)]
     pub fn new_work(&mut self, header_bytes: Buffer, target: Buffer, mining_request_id: u32) {
         self.threadpool
             .new_work(&header_bytes, &target, mining_request_id)
     }
 
     #[napi]
-    #[allow(dead_code)]
     pub fn stop(&self) {
         self.threadpool.stop()
     }
 
     #[napi]
-    #[allow(dead_code)]
     pub fn pause(&self) {
         self.threadpool.pause()
     }
 
     #[napi]
-    #[allow(dead_code)]
     pub fn get_found_block(&self) -> Option<FoundBlockResult> {
         if let Some(result) = self.threadpool.get_found_block() {
             return Some(FoundBlockResult {
@@ -107,8 +108,12 @@ impl ThreadPoolHandler {
     }
 
     #[napi]
-    #[allow(dead_code)]
     pub fn get_hash_rate_submission(&self) -> u32 {
         self.threadpool.get_hash_rate_submission()
     }
+}
+
+#[napi]
+pub fn is_valid_public_address(hex_address: String) -> bool {
+    PublicAddress::from_hex(&hex_address).is_ok()
 }

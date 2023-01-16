@@ -5,15 +5,25 @@
 use std::cell::RefCell;
 use std::convert::TryInto;
 
-use ironfish_rust::{MerkleNoteHash, ProposedTransaction, PublicAddress, SaplingKey, Transaction};
-use napi::bindgen_prelude::*;
+use ironfish_rust::assets::asset::AssetIdentifier;
+use ironfish_rust::transaction::batch_verify_transactions;
+use ironfish_rust::{
+    MerkleNoteHash, ProposedTransaction, PublicAddress, SaplingKey, Transaction,
+    TRANSACTION_VERSION as TX_VERSION,
+};
+use napi::{
+    bindgen_prelude::{i64n, BigInt, Buffer, Env, Object, Result, Undefined},
+    JsBuffer,
+};
 use napi_derive::napi;
 
-use ironfish_rust::sapling_bls12::SAPLING;
+use crate::to_napi_err;
 
 use super::note::NativeNote;
-use super::spend_proof::NativeSpendProof;
+use super::spend_proof::NativeSpendDescription;
 use super::witness::JsWitness;
+use super::{NativeAsset, ENCRYPTED_NOTE_LENGTH};
+use ironfish_rust::transaction::outputs::PROOF_SIZE;
 
 #[napi(js_name = "TransactionPosted")]
 pub struct NativeTransactionPosted {
@@ -21,13 +31,18 @@ pub struct NativeTransactionPosted {
 }
 
 #[napi]
+pub const PROOF_LENGTH: u32 = PROOF_SIZE;
+
+#[napi]
+pub const TRANSACTION_VERSION: u8 = TX_VERSION;
+
+#[napi]
 impl NativeTransactionPosted {
     #[napi(constructor)]
-    pub fn new(bytes: Buffer) -> Result<NativeTransactionPosted> {
-        let mut cursor = std::io::Cursor::new(bytes);
+    pub fn new(js_bytes: JsBuffer) -> Result<NativeTransactionPosted> {
+        let bytes = js_bytes.into_value()?;
 
-        let transaction = Transaction::read(SAPLING.clone(), &mut cursor)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+        let transaction = Transaction::read(bytes.as_ref()).map_err(to_napi_err)?;
 
         Ok(NativeTransactionPosted { transaction })
     }
@@ -35,9 +50,7 @@ impl NativeTransactionPosted {
     #[napi]
     pub fn serialize(&self) -> Result<Buffer> {
         let mut vec: Vec<u8> = vec![];
-        self.transaction
-            .write(&mut vec)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+        self.transaction.write(&mut vec).map_err(to_napi_err)?;
 
         Ok(Buffer::from(vec))
     }
@@ -54,10 +67,10 @@ impl NativeTransactionPosted {
     pub fn notes_length(&self) -> Result<i64> {
         let notes_len: i64 = self
             .transaction
-            .receipts()
+            .outputs()
             .len()
             .try_into()
-            .map_err(|_| Error::from_reason("Value out of range".to_string()))?;
+            .map_err(|_| to_napi_err("Value out of range"))?;
 
         Ok(notes_len)
     }
@@ -66,15 +79,11 @@ impl NativeTransactionPosted {
     pub fn get_note(&self, index: i64) -> Result<Buffer> {
         let index_usize: usize = index
             .try_into()
-            .map_err(|_| Error::from_reason("Value out of range".to_string()))?;
+            .map_err(|_| to_napi_err("Value out of range"))?;
 
-        let proof = &self.transaction.receipts()[index_usize];
-        // Note bytes are 275
-        let mut vec: Vec<u8> = Vec::with_capacity(275);
-        proof
-            .merkle_note()
-            .write(&mut vec)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+        let proof = &self.transaction.outputs()[index_usize];
+        let mut vec: Vec<u8> = Vec::with_capacity(ENCRYPTED_NOTE_LENGTH as usize);
+        proof.merkle_note().write(&mut vec).map_err(to_napi_err)?;
 
         Ok(Buffer::from(vec))
     }
@@ -86,16 +95,16 @@ impl NativeTransactionPosted {
             .spends()
             .len()
             .try_into()
-            .map_err(|_| Error::from_reason("Value out of range".to_string()))?;
+            .map_err(|_| to_napi_err("Value out of range"))?;
 
         Ok(spends_len)
     }
 
     #[napi]
-    pub fn get_spend(&self, index: i64) -> Result<NativeSpendProof> {
+    pub fn get_spend(&self, index: i64) -> Result<NativeSpendDescription> {
         let index_usize: usize = index
             .try_into()
-            .map_err(|_| Error::from_reason("Value out of range".to_string()))?;
+            .map_err(|_| to_napi_err("Value out of range"))?;
 
         let proof = &self.transaction.spends()[index_usize];
 
@@ -103,11 +112,11 @@ impl NativeTransactionPosted {
 
         MerkleNoteHash::new(proof.root_hash())
             .write(&mut root_hash)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+            .map_err(to_napi_err)?;
 
         let nullifier = Buffer::from(proof.nullifier().to_vec());
 
-        Ok(NativeSpendProof {
+        Ok(NativeSpendDescription {
             tree_size: proof.tree_size(),
             root_hash: Buffer::from(root_hash),
             nullifier,
@@ -116,7 +125,7 @@ impl NativeTransactionPosted {
 
     #[napi]
     pub fn fee(&self) -> i64n {
-        i64n(self.transaction.transaction_fee())
+        i64n(self.transaction.fee())
     }
 
     #[napi]
@@ -125,7 +134,7 @@ impl NativeTransactionPosted {
         self.transaction
             .binding_signature()
             .write(&mut serialized_signature)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+            .map_err(to_napi_err)?;
 
         Ok(Buffer::from(serialized_signature))
     }
@@ -138,8 +147,8 @@ impl NativeTransactionPosted {
     }
 
     #[napi]
-    pub fn expiration_sequence(&self) -> u32 {
-        self.transaction.expiration_sequence()
+    pub fn expiration(&self) -> u32 {
+        self.transaction.expiration()
     }
 }
 
@@ -148,53 +157,69 @@ pub struct NativeTransaction {
     transaction: ProposedTransaction,
 }
 
-impl Default for NativeTransaction {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[napi]
 impl NativeTransaction {
     #[napi(constructor)]
-    pub fn new() -> NativeTransaction {
-        NativeTransaction {
-            transaction: ProposedTransaction::new(SAPLING.clone()),
-        }
+    pub fn new(spender_hex_key: String) -> Result<NativeTransaction> {
+        let spender_key = SaplingKey::from_hex(&spender_hex_key).map_err(to_napi_err)?;
+        Ok(NativeTransaction {
+            transaction: ProposedTransaction::new(spender_key),
+        })
     }
 
     /// Create a proof of a new note owned by the recipient in this transaction.
     #[napi]
-    pub fn receive(&mut self, spender_hex_key: String, note: &NativeNote) -> Result<String> {
-        let spender_key = SaplingKey::from_hex(&spender_hex_key)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+    pub fn receive(&mut self, note: &NativeNote) -> Result<()> {
         self.transaction
-            .receive(&spender_key, &note.note)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
-        Ok("".to_string())
+            .add_output(note.note.clone())
+            .map_err(to_napi_err)?;
+
+        Ok(())
     }
 
     /// Spend the note owned by spender_hex_key at the given witness location.
     #[napi]
-    pub fn spend(
-        &mut self,
-        env: Env,
-        spender_hex_key: String,
-        note: &NativeNote,
-        witness: Object,
-    ) -> Result<String> {
+    pub fn spend(&mut self, env: Env, note: &NativeNote, witness: Object) -> Result<()> {
         let w = JsWitness {
             cx: RefCell::new(env),
             obj: witness,
         };
 
-        let spender_key = SaplingKey::from_hex(&spender_hex_key)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
         self.transaction
-            .spend(spender_key, &note.note, &w)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+            .add_spend(note.note.clone(), &w)
+            .map_err(to_napi_err)?;
 
-        Ok("".to_string())
+        Ok(())
+    }
+
+    /// return the sender of the transaction
+    #[napi]
+    pub fn sender(&mut self) -> String {
+        self.transaction.sender().hex_public_address()
+    }
+
+    /// Mint a new asset with a given value as part of this transaction.
+    #[napi]
+    pub fn mint(&mut self, asset: &NativeAsset, value: BigInt) -> Result<()> {
+        let value_u64 = value.get_u64().1;
+        self.transaction
+            .add_mint(asset.asset, value_u64)
+            .map_err(to_napi_err)?;
+
+        Ok(())
+    }
+
+    /// Burn some supply of a given asset and value as part of this transaction.
+    #[napi]
+    pub fn burn(&mut self, asset_id_js_bytes: JsBuffer, value: BigInt) -> Result<()> {
+        let asset_id_bytes = asset_id_js_bytes.into_value()?;
+        let asset_id: AssetIdentifier = asset_id_bytes.as_ref().try_into().map_err(to_napi_err)?;
+        let value_u64 = value.get_u64().1;
+        self.transaction
+            .add_burn(asset_id, value_u64)
+            .map_err(to_napi_err)?;
+
+        Ok(())
     }
 
     /// Special case for posting a miners fee transaction. Miner fee transactions
@@ -204,15 +229,10 @@ impl NativeTransaction {
     /// as the miners fee.
     #[napi(js_name = "post_miners_fee")]
     pub fn post_miners_fee(&mut self) -> Result<Buffer> {
-        let transaction = self
-            .transaction
-            .post_miners_fee()
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+        let transaction = self.transaction.post_miners_fee().map_err(to_napi_err)?;
 
         let mut vec: Vec<u8> = vec![];
-        transaction
-            .write(&mut vec)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+        transaction.write(&mut vec).map_err(to_napi_err)?;
         Ok(Buffer::from(vec))
     }
 
@@ -225,42 +245,47 @@ impl NativeTransaction {
     /// wouldn't accept a transaction that takes money away from them.
     ///
     /// sum(spends) - sum(outputs) - intended_transaction_fee - change = 0
-    /// aka: self.transaction_fee - intended_transaction_fee - change = 0
+    /// aka: self.value_balance - intended_transaction_fee - change = 0
     #[napi]
     pub fn post(
         &mut self,
-        spender_hex_key: String,
         change_goes_to: Option<String>,
         intended_transaction_fee: BigInt,
     ) -> Result<Buffer> {
         let intended_transaction_fee_u64 = intended_transaction_fee.get_u64().1;
 
-        let spender_key = SaplingKey::from_hex(&spender_hex_key)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
         let change_key = match change_goes_to {
-            Some(address) => Some(
-                PublicAddress::from_hex(&address)
-                    .map_err(|err| Error::from_reason(err.to_string()))?,
-            ),
+            Some(address) => Some(PublicAddress::from_hex(&address).map_err(to_napi_err)?),
             None => None,
         };
 
         let posted_transaction = self
             .transaction
-            .post(&spender_key, change_key, intended_transaction_fee_u64)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+            .post(change_key, intended_transaction_fee_u64)
+            .map_err(to_napi_err)?;
 
         let mut vec: Vec<u8> = vec![];
-        posted_transaction
-            .write(&mut vec)
-            .map_err(|err| Error::from_reason(err.to_string()))?;
+        posted_transaction.write(&mut vec).map_err(to_napi_err)?;
 
         Ok(Buffer::from(vec))
     }
 
     #[napi]
-    pub fn set_expiration_sequence(&mut self, expiration_sequence: u32) -> Undefined {
-        self.transaction
-            .set_expiration_sequence(expiration_sequence);
+    pub fn set_expiration(&mut self, sequence: u32) -> Undefined {
+        self.transaction.set_expiration(sequence);
     }
+}
+
+#[napi]
+pub fn verify_transactions(serialized_transactions: Vec<Buffer>) -> bool {
+    let mut transactions: Vec<Transaction> = vec![];
+
+    for tx_bytes in serialized_transactions {
+        match Transaction::read(&mut tx_bytes.as_ref()) {
+            Ok(tx) => transactions.push(tx),
+            Err(_) => return false,
+        }
+    }
+
+    batch_verify_transactions(transactions.iter()).is_ok()
 }

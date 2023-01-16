@@ -4,33 +4,34 @@
 
 import { Assert } from './assert'
 import { Blockchain } from './blockchain'
-import { GENESIS_BLOCK_SEQUENCE, VerificationResultReason } from './consensus'
-import { Event } from './event'
+import { VerificationResultReason } from './consensus'
 import { createRootLogger, Logger } from './logger'
 import { Meter, MetricsMonitor } from './metrics'
+import { RollingAverage } from './metrics/rollingAverage'
 import { Peer, PeerNetwork } from './network'
-import { BAN_SCORE, KnownBlockHashesValue, PeerState } from './network/peers/peer'
-import { Block, SerializedBlock } from './primitives/block'
+import { BAN_SCORE, PeerState } from './network/peers/peer'
+import { Block, GENESIS_BLOCK_SEQUENCE } from './primitives/block'
 import { BlockHeader } from './primitives/blockheader'
-import { Strategy } from './strategy'
 import { Telemetry } from './telemetry'
-import { BenchUtils, ErrorUtils, HashUtils, MathUtils, SetTimeoutToken } from './utils'
+import { ErrorUtils, HashUtils, MathUtils, SetTimeoutToken } from './utils'
 import { ArrayUtils } from './utils/array'
 
 const SYNCER_TICK_MS = 10 * 1000
 const LINEAR_ANCESTOR_SEARCH = 3
 const REQUEST_BLOCKS_PER_MESSAGE = 20
 
-class AbortSyncingError extends Error {}
+class AbortSyncingError extends Error {
+  name = this.constructor.name
+}
 
 export class Syncer {
   readonly peerNetwork: PeerNetwork
   readonly chain: Blockchain
-  readonly strategy: Strategy
   readonly metrics: MetricsMonitor
   readonly telemetry: Telemetry
   readonly logger: Logger
   readonly speed: Meter
+  readonly downloadSpeed: RollingAverage
 
   state: 'stopped' | 'idle' | 'stopping' | 'syncing'
   stopping: Promise<void> | null
@@ -38,12 +39,9 @@ export class Syncer {
   loader: Peer | null = null
   blocksPerMessage: number
 
-  onGossip = new Event<[Block]>()
-
   constructor(options: {
     peerNetwork: PeerNetwork
     chain: Blockchain
-    strategy: Strategy
     telemetry: Telemetry
     metrics?: MetricsMonitor
     logger?: Logger
@@ -53,7 +51,6 @@ export class Syncer {
 
     this.peerNetwork = options.peerNetwork
     this.chain = options.chain
-    this.strategy = options.strategy
     this.logger = logger.withTag('syncer')
     this.telemetry = options.telemetry
 
@@ -61,6 +58,7 @@ export class Syncer {
 
     this.state = 'stopped'
     this.speed = this.metrics.addMeter()
+    this.downloadSpeed = new RollingAverage(5)
     this.stopping = null
     this.eventLoopTimeout = null
 
@@ -140,13 +138,12 @@ export class Syncer {
     }
 
     Assert.isNotNull(peer.sequence)
-    Assert.isNotNull(peer.work)
-    Assert.isNotNull(this.chain.head)
 
+    const work = peer.work ? ` work: +${(peer.work - this.chain.head.work).toString()},` : ''
     this.logger.info(
-      `Starting sync from ${peer.displayName}. work: +${(
-        peer.work - this.chain.head.work
-      ).toString()}, ours: ${this.chain.head.sequence.toString()}, theirs: ${peer.sequence.toString()}`,
+      `Starting sync from ${
+        peer.displayName
+      }.${work} ours: ${this.chain.head.sequence.toString()}, theirs: ${peer.sequence.toString()}`,
     )
 
     this.state = 'syncing'
@@ -220,7 +217,6 @@ export class Syncer {
   ): Promise<{ sequence: number; ancestor: Buffer; requests: number }> {
     Assert.isNotNull(peer.head, 'peer.head')
     Assert.isNotNull(peer.sequence, 'peer.sequence')
-    Assert.isNotNull(this.chain.head, 'chain.head')
 
     let requests = 0
 
@@ -262,7 +258,7 @@ export class Syncer {
       requests++
 
       const needle = start - i * 2
-      const hashes = await this.peerNetwork.getBlockHashes(peer, needle, 1)
+      const { hashes } = await this.peerNetwork.getBlockHashes(peer, needle, 1)
       if (!hashes.length) {
         continue
       }
@@ -303,13 +299,9 @@ export class Syncer {
     while (lower <= upper) {
       requests++
 
-      const start = BenchUtils.start()
-
       const needle = Math.floor((lower + upper) / 2)
-      const hashes = await this.peerNetwork.getBlockHashes(peer, needle, 1)
+      const { hashes, time } = await this.peerNetwork.getBlockHashes(peer, needle, 1)
       const remote = hashes.length === 1 ? hashes[0] : null
-
-      const end = BenchUtils.end(start)
 
       const { found, local } = await hasHash(remote)
 
@@ -318,10 +310,19 @@ export class Syncer {
           peer.displayName
         }, needle: ${needle}, lower: ${lower}, upper: ${upper}, hash: ${HashUtils.renderHash(
           remote,
-        )}, time: ${end.toFixed(2)}ms: ${found ? 'HIT' : 'MISS'}`,
+        )}, time: ${time.toFixed(2)}ms: ${found ? 'HIT' : 'MISS'}`,
       )
 
       if (!found) {
+        if (needle === GENESIS_BLOCK_SEQUENCE) {
+          this.logger.warn(
+            `Peer ${peer.displayName} sent a genesis block hash that doesn't match our genesis block hash`,
+          )
+
+          peer.punish(BAN_SCORE.MAX, VerificationResultReason.INVALID_GENESIS_BLOCK)
+          this.abort(peer)
+        }
+
         upper = needle - 1
         continue
       }
@@ -339,8 +340,8 @@ export class Syncer {
       lower = needle + 1
     }
 
-    Assert.isNotNull(ancestorHash)
     Assert.isNotNull(ancestorSequence)
+    Assert.isNotNull(ancestorHash)
 
     return {
       ancestor: ancestorHash,
@@ -349,40 +350,86 @@ export class Syncer {
     }
   }
 
-  async syncBlocks(peer: Peer, head: Buffer | null, sequence: number): Promise<void> {
-    this.abort(peer)
+  private async getBlocks(
+    peer: Peer,
+    sequence: number,
+    start: Buffer,
+    limit: number,
+  ): Promise<{ ok: true; blocks: Block[]; time: number } | { ok: false }> {
+    this.logger.info(
+      `Requesting ${limit - 1} blocks starting at ${HashUtils.renderHash(
+        start,
+      )} (${sequence}) from ${peer.displayName}`,
+    )
 
-    let count = 0
-    let skipped = 0
+    return this.peerNetwork
+      .getBlocks(peer, start, limit)
+      .then((result): { ok: true; blocks: Block[]; time: number } => {
+        return { ok: true, blocks: result.blocks, time: result.time }
+      })
+      .catch((e) => {
+        this.logger.warn(
+          `Error while syncing from ${peer.displayName}: ${ErrorUtils.renderError(e)}`,
+        )
 
-    while (head) {
-      this.logger.info(
-        `Requesting ${this.blocksPerMessage} blocks starting at ${HashUtils.renderHash(
-          head,
-        )} (${sequence}) from ${peer.displayName}`,
-      )
+        return { ok: false }
+      })
+  }
 
-      const [headBlock, ...blocks]: SerializedBlock[] = await this.peerNetwork.getBlocks(
-        peer,
-        head,
-        this.blocksPerMessage + 1,
-      )
+  async syncBlocks(peer: Peer, head: Buffer, sequence: number): Promise<void> {
+    let currentHead = head
+    let currentSequence = sequence
+
+    let blocksPromise = this.getBlocks(
+      peer,
+      currentSequence,
+      currentHead,
+      this.blocksPerMessage + 1,
+    )
+
+    while (currentHead) {
+      const blocksResult = await blocksPromise
+      if (!blocksResult.ok) {
+        peer.close()
+        this.stopSync(peer)
+        return
+      }
+
+      const {
+        blocks: [headBlock, ...blocks],
+        time,
+      } = blocksResult
 
       if (!headBlock) {
         peer.punish(BAN_SCORE.MAX, 'empty GetBlocks message')
       }
 
+      this.downloadSpeed.add((blocks.length + 1) / (time / 1000))
+
       this.abort(peer)
 
-      for (const addBlock of blocks) {
-        sequence += 1
+      // If they sent a full message they have more blocks so
+      // optimistically request the next batch
+      if (blocks.length >= this.blocksPerMessage) {
+        const block = blocks.at(-1) || headBlock
 
-        const { added, block } = await this.addBlock(peer, addBlock)
+        blocksPromise = this.getBlocks(
+          peer,
+          block.header.sequence,
+          block.header.hash,
+          this.blocksPerMessage + 1,
+        )
+      }
+
+      for (const addBlock of blocks) {
+        currentSequence += 1
+
+        const { block } = await this.addBlock(peer, addBlock)
         this.abort(peer)
 
-        if (block.header.sequence !== sequence) {
+        if (block.header.sequence !== currentSequence) {
           this.logger.warn(
-            `Peer ${peer.displayName} sent block out of sequence. Expected ${sequence} but got ${block.header.sequence}`,
+            `Peer ${peer.displayName} sent block out of sequence. Expected ${currentSequence} but got ${block.header.sequence}`,
           )
 
           peer.punish(BAN_SCORE.MAX, 'out of sequence')
@@ -396,12 +443,7 @@ export class Syncer {
           peer.work = block.header.work
         }
 
-        head = block.header.hash
-        count += 1
-
-        if (!added) {
-          skipped += 1
-        }
+        currentHead = block.header.hash
       }
 
       // They didn't send a full message so they have no more blocks
@@ -412,23 +454,17 @@ export class Syncer {
       this.abort(peer)
     }
 
-    this.logger.info(
-      `Finished syncing ${count} blocks from ${peer.displayName}` +
-        (skipped ? `, skipped ${skipped}` : ''),
-    )
+    this.logger.info(`Finished syncing from ${peer.displayName}`)
   }
 
   async addBlock(
     peer: Peer,
-    serialized: SerializedBlock,
+    block: Block,
   ): Promise<{
     added: boolean
     block: Block
     reason: VerificationResultReason | null
   }> {
-    Assert.isNotNull(this.chain.head)
-
-    const block = this.chain.strategy.blockSerde.deserialize(serialized)
     const { isAdded, reason, score } = await this.chain.addBlock(block)
 
     this.speed.add(1)
@@ -471,35 +507,6 @@ export class Syncer {
 
     Assert.isTrue(isAdded)
     return { added: true, block, reason: reason || null }
-  }
-
-  async addNewBlock(peer: Peer, newBlock: SerializedBlock): Promise<boolean> {
-    // We drop blocks when we are still initially syncing as they
-    // will become loose blocks and we can't verify them
-    if (!this.chain.synced && this.loader) {
-      return false
-    }
-
-    const seenAt = new Date()
-
-    const { added, block } = await this.addBlock(peer, newBlock)
-
-    peer.knownBlockHashes.set(block.header.hash, KnownBlockHashesValue.Received)
-    for (const knownPeer of peer.knownPeers.values()) {
-      knownPeer.knownBlockHashes.set(block.header.hash, KnownBlockHashesValue.Received)
-    }
-
-    if (!peer.sequence || block.header.sequence > peer.sequence) {
-      peer.sequence = block.header.sequence
-    }
-
-    this.onGossip.emit(block)
-
-    if (added) {
-      this.telemetry.submitNewBlockSeen(block, seenAt)
-    }
-
-    return added
   }
 
   /**

@@ -48,9 +48,14 @@ export class KeyStore<TSchema extends Record<string, unknown>> {
 
     // Validate file store if we have a schema
     if (this.schema) {
-      const { error } = await YupUtils.tryValidate(this.schema, data)
+      const { error, result } = await YupUtils.tryValidate(this.schema, data)
+
       if (error) {
         throw new Error(error.message)
+      }
+
+      if (data != null) {
+        Object.assign(data, result)
       }
     }
 
@@ -66,7 +71,7 @@ export class KeyStore<TSchema extends Record<string, unknown>> {
 
     this.loaded = { ...data } as Partial<TSchema>
 
-    //  Patch back in inheritence so config is still TSchema
+    //  Patch back in inheritance so config is still TSchema
     Object.setPrototypeOf(this.loaded, this.defaults)
     Object.setPrototypeOf(this.overrides, this.loaded)
 
@@ -92,9 +97,22 @@ export class KeyStore<TSchema extends Record<string, unknown>> {
   }
 
   set<T extends keyof TSchema>(key: T, value: TSchema[T]): void {
+    const schema = this.schema?.fields[key]
+
+    if (schema) {
+      const { error, result } = YupUtils.tryValidateSync(schema, value)
+
+      if (error) {
+        throw error
+      }
+
+      value = result as TSchema[T]
+    }
+
     const previousValue = this.config[key]
 
     Object.assign(this.loaded, { [key]: value })
+    this.keysLoaded.add(key)
 
     if (Object.prototype.hasOwnProperty.call(this.overrides, key)) {
       delete this.overrides[key]
@@ -131,5 +149,12 @@ export class KeyStore<TSchema extends Record<string, unknown>> {
     }
 
     return value.split(',').filter(Boolean) as TSchema[T]
+  }
+
+  /**
+   * Returns true if the key is set, or false if its value is from the defaults
+   */
+  isSet<T extends keyof TSchema>(key: T): boolean {
+    return this.keysLoaded.has(key) || Object.prototype.hasOwnProperty.call(this.overrides, key)
   }
 }

@@ -1,7 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-import net from 'net'
 import * as yup from 'yup'
 import { IronfishNode } from '../../../node'
 import { RpcIpcAdapter } from '../../adapters'
@@ -25,7 +24,7 @@ export type GetRpcStatusResponse = {
     readBytes: number
     writtenBytes: number
     clients: number
-    pending: number
+    pending: string[]
   }[]
 }
 
@@ -51,7 +50,7 @@ export const GetRpcStatusResponseSchema: yup.ObjectSchema<GetRpcStatusResponse> 
             readBytes: yup.number().defined(),
             writtenBytes: yup.number().defined(),
             clients: yup.number().defined(),
-            pending: yup.number().defined(),
+            pending: yup.array(yup.string().defined()).defined(),
           })
           .defined(),
       )
@@ -103,30 +102,7 @@ function getRpcStatus(node: IronfishNode): GetRpcStatusResponse {
       readBytes: 0,
       writtenBytes: 0,
       clients: 0,
-      pending: 0,
-    }
-
-    if (adapter instanceof RpcIpcAdapter) {
-      if (!adapter.ipc) {
-        continue
-      }
-
-      for (const socket of adapter.ipc.server.sockets) {
-        if (socket instanceof net.Socket) {
-          formatted.readableBytes += socket.readableLength
-          formatted.writableBytes += socket.writableLength
-          formatted.readBytes += socket.bytesRead
-          formatted.writtenBytes += socket.bytesWritten
-        }
-      }
-
-      for (const pending of adapter.pending.values()) {
-        formatted.pending += pending.length
-      }
-
-      formatted.inbound = Math.max(adapter.inboundTraffic.rate1s, 0)
-      formatted.outbound = Math.max(adapter.outboundTraffic.rate1s, 0)
-      formatted.clients = adapter.ipc?.server.sockets.length ?? 0
+      pending: new Array<string>(),
     }
 
     if (adapter instanceof RpcSocketAdapter) {
@@ -135,7 +111,7 @@ function getRpcStatus(node: IronfishNode): GetRpcStatusResponse {
         formatted.writableBytes += client.socket.writableLength
         formatted.readBytes += client.socket.bytesRead
         formatted.writtenBytes += client.socket.bytesWritten
-        formatted.pending += client.requests.size
+        client.requests.forEach((r) => formatted.pending.push(r.route))
       }
 
       formatted.inbound = Math.max(adapter.inboundTraffic.rate1s, 0)

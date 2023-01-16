@@ -14,7 +14,7 @@ import { ErrorUtils } from '../utils/error'
 import { FileUtils } from '../utils/file'
 import { PromiseUtils } from '../utils/promise'
 import { SetTimeoutToken } from '../utils/types'
-import { mineableHeaderString } from './utils'
+import { MINEABLE_BLOCK_HEADER_GRAFFITI_OFFSET, mineableHeaderString } from './utils'
 
 const RECALCULATE_TARGET_TIMEOUT = 10000
 
@@ -129,7 +129,7 @@ export class MiningSoloMiner {
     )
 
     const headerBytes = Buffer.concat([header])
-    headerBytes.set(this.graffiti, 176)
+    headerBytes.set(this.graffiti, MINEABLE_BLOCK_HEADER_GRAFFITI_OFFSET)
 
     this.waiting = false
     this.threadPool.newWork(headerBytes, this.target, miningRequestId)
@@ -148,14 +148,19 @@ export class MiningSoloMiner {
   }
 
   private async processNewBlocks() {
-    for await (const payload of this.rpc.blockTemplateStream().contentStream(true)) {
+    const consensusParameters = (await this.rpc.getConsensusParameters()).content
+
+    for await (const payload of this.rpc.blockTemplateStream().contentStream()) {
       Assert.isNotUndefined(payload.previousBlockInfo)
 
       const currentHeadTarget = new Target(Buffer.from(payload.previousBlockInfo.target, 'hex'))
       this.currentHeadDifficulty = currentHeadTarget.toDifficulty()
       this.currentHeadTimestamp = payload.previousBlockInfo.timestamp
 
-      this.restartCalculateTargetInterval()
+      this.restartCalculateTargetInterval(
+        consensusParameters.targetBlockTimeInSeconds,
+        consensusParameters.targetBucketTimeInSeconds,
+      )
       this.startNewWork(payload)
     }
   }
@@ -237,9 +242,7 @@ export class MiningSoloMiner {
 
     if (!connected) {
       if (!this.connectWarned) {
-        this.logger.warn(
-          `Failed to connect to node on ${String(this.rpc.connection.mode)}, retrying...`,
-        )
+        this.logger.warn(`Failed to connect to node on ${this.rpc.describe()}, retrying...`)
         this.connectWarned = true
       }
 
@@ -252,13 +255,16 @@ export class MiningSoloMiner {
     this.logger.info('Listening to node for new blocks')
 
     void this.processNewBlocks().catch((e: unknown) => {
-      this.logger.error('Fatal error occured while processing blocks from node:')
+      this.logger.error('Fatal error occurred while processing blocks from node:')
       this.logger.error(ErrorUtils.renderError(e, true))
       this.stop()
     })
   }
 
-  private recalculateTarget() {
+  private recalculateTarget(
+    targetBlockTimeInSeconds: number,
+    targetBucketTimeInSeconds: number,
+  ) {
     Assert.isNotNull(this.currentHeadTimestamp)
     Assert.isNotNull(this.currentHeadDifficulty)
 
@@ -271,22 +277,27 @@ export class MiningSoloMiner {
         newTime,
         new Date(this.currentHeadTimestamp),
         this.currentHeadDifficulty,
+        targetBlockTimeInSeconds,
+        targetBucketTimeInSeconds,
       ),
     )
 
-    latestBlock.header.target = BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')
+    latestBlock.header.target = BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')
     latestBlock.header.timestamp = newTime.getTime()
 
     this.startNewWork(latestBlock)
   }
 
-  private restartCalculateTargetInterval() {
+  private restartCalculateTargetInterval(
+    targetBlockTimeInSeconds: number,
+    targetBucketTimeInSeconds: number,
+  ) {
     if (this.recalculateTargetInterval) {
       clearInterval(this.recalculateTargetInterval)
     }
 
     this.recalculateTargetInterval = setInterval(() => {
-      this.recalculateTarget()
+      this.recalculateTarget(targetBlockTimeInSeconds, targetBucketTimeInSeconds)
     }, RECALCULATE_TARGET_TIMEOUT)
   }
 }

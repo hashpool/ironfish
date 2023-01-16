@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 import { AbstractLevelDOWN } from 'abstract-leveldown'
 import levelErrors from 'level-errors'
+import LevelDOWN from 'leveldown'
 import levelup, { LevelUp } from 'levelup'
 import { Assert } from '../../assert'
 import { Mutex } from '../../mutex'
@@ -10,6 +11,7 @@ import { IJsonSerializable } from '../../serde'
 import {
   BatchOperation,
   Database,
+  DATABASE_ALL_KEY_RANGE,
   DatabaseSchema,
   IDatabaseStore,
   IDatabaseStoreOptions,
@@ -23,10 +25,20 @@ import {
   DatabaseIsCorruptError,
   DatabaseIsLockedError,
   DatabaseIsOpenError,
+  DatabaseVersionError,
 } from '../database/errors'
+import { DatabaseIteratorOptions, DatabaseKeyRange } from '../database/types'
 import { LevelupBatch } from './batch'
 import { LevelupStore } from './store'
 import { LevelupTransaction } from './transaction'
+
+interface INotFoundError {
+  type: 'NotFoundError'
+}
+
+function isNotFoundError(error: unknown): error is INotFoundError {
+  return (error as INotFoundError)?.type === 'NotFoundError'
+}
 
 type MetaSchema = {
   key: string
@@ -63,6 +75,9 @@ export class LevelupDatabase extends Database {
     return this._levelup?.isOpen() || false
   }
 
+  /**
+   * @param options https://github.com/Level/leveldown/blob/51979d11f576c480bc5729a6adea6ac9fed57216/binding.cc#L980k,
+   */
   async open(): Promise<void> {
     this._levelup = await new Promise<LevelUp>((resolve, reject) => {
       const opened = levelup(this.db, (error?: unknown) => {
@@ -101,23 +116,27 @@ export class LevelupDatabase extends Database {
   async upgrade(version: number): Promise<void> {
     Assert.isTrue(this.isOpen, 'Database needs to be open')
 
-    const current = await this.metaStore.get('version')
-
-    if (current === undefined) {
-      await this.metaStore.put('version', version)
-      return
-    }
-
-    if (typeof current !== 'number') {
-      throw new Error(`Corrupted database version ${typeof current}: ${String(current)}`)
-    }
+    const current = await this.getVersion()
 
     if (current !== version) {
-      throw new Error(
-        `You are running a newer version of ironfish on an older database.\n` +
-          `Run "ironfish reset" to reset your database.\n`,
-      )
+      throw new DatabaseVersionError(current, version)
     }
+  }
+
+  compact(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (this.db instanceof LevelDOWN) {
+        const start = DATABASE_ALL_KEY_RANGE.gte
+        const end = DATABASE_ALL_KEY_RANGE.lt
+
+        Assert.isNotUndefined(start)
+        Assert.isNotUndefined(end)
+
+        this.db.compactRange(start, end, (err) => (err ? reject(err) : resolve()))
+      } else {
+        resolve()
+      }
+    })
   }
 
   transaction<TResult>(
@@ -170,6 +189,64 @@ export class LevelupDatabase extends Database {
     }
 
     return batch.commit()
+  }
+
+  async get(key: Readonly<Buffer>): Promise<Buffer | undefined> {
+    try {
+      const data = (await this.levelup.get(key)) as unknown
+
+      if (!(data instanceof Buffer)) {
+        return undefined
+      }
+
+      return data
+    } catch (error: unknown) {
+      if (isNotFoundError(error)) {
+        return undefined
+      }
+
+      throw error
+    }
+  }
+
+  async put(key: Readonly<Buffer>, value: Buffer): Promise<void> {
+    await this.levelup.put(key, value)
+  }
+
+  async *getAllIter(
+    range?: DatabaseKeyRange,
+    options?: DatabaseIteratorOptions,
+  ): AsyncGenerator<[Buffer, Buffer]> {
+    const stream = this.levelup.createReadStream({ ...range, ...options })
+
+    // The return type for createReadStream is wrong
+    const iter = stream as unknown as AsyncIterable<{
+      key: Buffer
+      value: Buffer
+    }>
+
+    for await (const { key, value } of iter) {
+      yield [key, value]
+    }
+  }
+
+  async getVersion(): Promise<number> {
+    let current = await this.metaStore.get('version')
+
+    if (current === undefined) {
+      current = 0
+      await this.metaStore.put('version', current)
+    }
+
+    if (typeof current !== 'number') {
+      throw new Error(`Corrupted database version ${typeof current}: ${String(current)}`)
+    }
+
+    return current
+  }
+
+  async putVersion(version: number, transaction?: IDatabaseTransaction): Promise<void> {
+    await this.metaStore.put('version', version, transaction)
   }
 
   protected _createStore<Schema extends DatabaseSchema>(

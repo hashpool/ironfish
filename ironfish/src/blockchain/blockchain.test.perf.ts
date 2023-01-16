@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /* eslint-disable no-console */
+import { Asset } from '@ironfish/rust-nodejs'
 import _ from 'lodash'
 import { Assert } from '../assert'
 import { Block } from '../primitives'
@@ -21,8 +22,8 @@ describe('Blockchain', () => {
     const { node: nodeA } = await nodeTest.createSetup()
     const { node: nodeB } = await nodeTest.createSetup()
 
-    const accountA = await useAccountFixture(nodeA.accounts, 'accountA')
-    const accountB = await useAccountFixture(nodeB.accounts, 'accountB')
+    const accountA = await useAccountFixture(nodeA.wallet, 'accountA')
+    const accountB = await useAccountFixture(nodeB.wallet, 'accountB')
 
     const blocksA = new Array<Block>()
     const blocksB = new Array<Block>()
@@ -35,8 +36,8 @@ describe('Blockchain', () => {
       let blockB: Block
 
       if (i === 0) {
-        blockA = await useMinerBlockFixture(nodeA.chain, undefined, accountA, nodeA.accounts)
-        blockB = await useMinerBlockFixture(nodeB.chain, undefined, accountB, nodeB.accounts)
+        blockA = await useMinerBlockFixture(nodeA.chain, undefined, accountA, nodeA.wallet)
+        blockB = await useMinerBlockFixture(nodeB.chain, undefined, accountB, nodeB.wallet)
       } else {
         const { block: bA } = await useBlockWithTx(nodeA, accountA, accountA, false)
         const { block: bB } = await useBlockWithTx(nodeB, accountB, accountB, false)
@@ -50,14 +51,14 @@ describe('Blockchain', () => {
         expect(nodeB.chain).toAddBlock(blockB),
       ])
 
-      await Promise.all([nodeA.accounts.updateHead(), nodeB.accounts.updateHead()])
+      await Promise.all([nodeA.wallet.updateHead(), nodeB.wallet.updateHead()])
 
       blocksA.push(blockA)
       blocksB.push(blockB)
     }
 
-    const balanceA = await nodeA.accounts.getBalance(accountA)
-    const balanceB = await nodeB.accounts.getBalance(accountB)
+    const balanceA = await nodeA.wallet.getBalance(accountA, Asset.nativeId())
+    const balanceB = await nodeB.wallet.getBalance(accountB, Asset.nativeId())
 
     // You'll need to update this if the block reward changes
     expect(balanceA.confirmed).toEqual(BigInt(1999999901))
@@ -157,7 +158,7 @@ describe('Blockchain', () => {
     printResults(await runTest(5, 10))
     printResults(await runTest(5, 50))
     printResults(await runTest(5, 100))
-  }, 780000)
+  }, 600000)
 })
 
 // Last results on Jason Spafford's Machine

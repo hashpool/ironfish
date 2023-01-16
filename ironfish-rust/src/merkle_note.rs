@@ -2,10 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::{errors::IronfishError, keys::EphemeralKeyPair, serializing::read_point};
+
 /// Implement a merkle note to store all the values that need to go into a merkle tree.
 /// A tree containing these values can serve as a snapshot of the entire chain.
 use super::{
-    errors,
     keys::{shared_secret, IncomingViewKey, OutgoingViewKey, PublicAddress, SaplingKey},
     note::{Note, ENCRYPTED_NOTE_SIZE},
     serializing::{aead, read_scalar},
@@ -17,23 +18,26 @@ use blake2b_simd::Params as Blake2b;
 use bls12_381::Scalar;
 use ff::PrimeField;
 use group::GroupEncoding;
+use ironfish_zkp::primitives::ValueCommitment;
 use jubjub::{ExtendedPoint, SubgroupPoint};
-use zcash_primitives::primitives::ValueCommitment;
 
 use std::{convert::TryInto, io};
 
 pub const ENCRYPTED_SHARED_KEY_SIZE: usize = 64;
+
+pub const NOTE_ENCRYPTION_KEY_SIZE: usize = ENCRYPTED_SHARED_KEY_SIZE + aead::MAC_SIZE;
 /// The note encryption keys are used to allow the spender to
 /// read notes that they have themselves have spent.
 /// In the case of miner notes, the note is created out of thin air
 /// and there is no actual spender. We set the note encryption keys
-/// to a known value, so they can be identified in the trees.
+/// to a known value, but this isn't enforced in consensus, so any
+/// value is valid.
 ///
-/// This does not leak information, since miner notes are identifiably
-/// stored separately on the header of blocks already.
-pub const NOTE_ENCRYPTION_MINER_KEYS: &[u8; ENCRYPTED_SHARED_KEY_SIZE + aead::MAC_SIZE] =
-    b"Beanstalk note encryption miner key000000000000000000000000000000000000000000000";
-const SHARED_KEY_PERSONALIZATION: &[u8; 16] = b"Beanstalk Keyenc";
+/// This does not leak information, since miner notes are already known
+/// to be on the first transaction in a block.
+pub const NOTE_ENCRYPTION_MINER_KEYS: &[u8; NOTE_ENCRYPTION_KEY_SIZE] =
+    b"Iron Fish note encryption miner key000000000000000000000000000000000000000000000";
+const SHARED_KEY_PERSONALIZATION: &[u8; 16] = b"Iron Fish Keyenc";
 
 #[derive(Clone)]
 pub struct MerkleNote {
@@ -47,7 +51,7 @@ pub struct MerkleNote {
     pub(crate) note_commitment: Scalar,
 
     /// Public part of ephemeral diffie-hellman key-pair. See the discussion on
-    /// keys::shared_secret to understand how this is used
+    /// [`shared_secret`] to understand how this is used
     pub(crate) ephemeral_public_key: SubgroupPoint,
 
     /// note as encrypted by the diffie hellman public key
@@ -57,7 +61,7 @@ pub struct MerkleNote {
     /// using the spender's outgoing viewing key, and allow the spender to
     /// decrypt it. The receiver (owner) doesn't need these, as they can decrypt
     /// the note directly using their incoming viewing key.
-    pub(crate) note_encryption_keys: [u8; ENCRYPTED_SHARED_KEY_SIZE + aead::MAC_SIZE],
+    pub(crate) note_encryption_keys: [u8; NOTE_ENCRYPTION_KEY_SIZE],
 }
 
 impl PartialEq for MerkleNote {
@@ -72,15 +76,10 @@ impl MerkleNote {
         spender_key: &SaplingKey,
         note: &Note,
         value_commitment: &ValueCommitment,
-        diffie_hellman_keys: &(jubjub::Fr, SubgroupPoint),
+        diffie_hellman_keys: &EphemeralKeyPair,
     ) -> MerkleNote {
-        let (secret_key, public_key) = diffie_hellman_keys;
-
-        let encrypted_note = note.encrypt(&shared_secret(
-            secret_key,
-            &note.owner.transmission_key,
-            public_key,
-        ));
+        let secret_key = diffie_hellman_keys.secret();
+        let public_key = diffie_hellman_keys.public();
 
         let mut key_bytes = [0; 64];
         key_bytes[..32].copy_from_slice(&note.owner.transmission_key.to_bytes());
@@ -92,8 +91,51 @@ impl MerkleNote {
             &note.commitment_point(),
             public_key,
         );
-        let mut note_encryption_keys = [0; ENCRYPTED_SHARED_KEY_SIZE + aead::MAC_SIZE];
-        aead::encrypt(&encryption_key, &key_bytes, &mut note_encryption_keys);
+        let note_encryption_keys: [u8; NOTE_ENCRYPTION_KEY_SIZE] =
+            aead::encrypt(&encryption_key, &key_bytes).unwrap();
+
+        Self::construct(
+            note,
+            value_commitment,
+            diffie_hellman_keys,
+            note_encryption_keys,
+        )
+    }
+
+    /// Helper function to instantiate a MerkleNote with pre-set
+    /// note_encryption_keys. Should only be used for miners fee transactions.
+    pub(crate) fn new_for_miners_fee(
+        note: &Note,
+        value_commitment: &ValueCommitment,
+        diffie_hellman_keys: &EphemeralKeyPair,
+    ) -> MerkleNote {
+        let note_encryption_keys = *NOTE_ENCRYPTION_MINER_KEYS;
+
+        Self::construct(
+            note,
+            value_commitment,
+            diffie_hellman_keys,
+            note_encryption_keys,
+        )
+    }
+
+    /// Helper function to cut down on duplicated code between
+    /// `MerkleNote::new` and `MerkleNote::new_for_miners_fee`. Should not
+    /// be used directly.
+    fn construct(
+        note: &Note,
+        value_commitment: &ValueCommitment,
+        diffie_hellman_keys: &EphemeralKeyPair,
+        note_encryption_keys: [u8; NOTE_ENCRYPTION_KEY_SIZE],
+    ) -> MerkleNote {
+        let secret_key = diffie_hellman_keys.secret();
+        let public_key = diffie_hellman_keys.public();
+
+        let encrypted_note = note.encrypt(&shared_secret(
+            secret_key,
+            &note.owner.transmission_key,
+            public_key,
+        ));
 
         MerkleNote {
             value_commitment: value_commitment.commitment().into(),
@@ -105,44 +147,16 @@ impl MerkleNote {
     }
 
     /// Load a MerkleNote from the given stream
-    pub fn read<R: io::Read>(mut reader: R) -> io::Result<Self> {
-        let value_commitment = {
-            let mut bytes = [0; 32];
-            reader.read_exact(&mut bytes)?;
-            let point = ExtendedPoint::from_bytes(&bytes);
-            if point.is_none().into() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Unable to convert note commitment",
-                ));
-            }
-            point.unwrap()
-        };
-
-        let note_commitment = read_scalar(&mut reader).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Unable to convert note commitment",
-            )
-        })?;
-
-        let ephemeral_public_key = {
-            let mut bytes = [0; 32];
-            reader.read_exact(&mut bytes)?;
-            let point = SubgroupPoint::from_bytes(&bytes);
-            if point.is_none().into() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Unable to convert note commitment",
-                ));
-            }
-            point.unwrap()
-        };
+    pub fn read<R: io::Read>(mut reader: R) -> Result<Self, IronfishError> {
+        let value_commitment = read_point(&mut reader)?;
+        let note_commitment = read_scalar(&mut reader)?;
+        let ephemeral_public_key = read_point(&mut reader)?;
 
         let mut encrypted_note = [0; ENCRYPTED_NOTE_SIZE + aead::MAC_SIZE];
         reader.read_exact(&mut encrypted_note[..])?;
-        let mut note_encryption_keys = [0; ENCRYPTED_SHARED_KEY_SIZE + aead::MAC_SIZE];
+        let mut note_encryption_keys = [0; NOTE_ENCRYPTION_KEY_SIZE];
         reader.read_exact(&mut note_encryption_keys[..])?;
+
         Ok(MerkleNote {
             value_commitment,
             note_commitment,
@@ -152,12 +166,13 @@ impl MerkleNote {
         })
     }
 
-    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> Result<(), IronfishError> {
         writer.write_all(&self.value_commitment.to_bytes())?;
-        writer.write_all(self.note_commitment.to_repr().as_ref())?;
+        writer.write_all(&self.note_commitment.to_bytes())?;
         writer.write_all(&self.ephemeral_public_key.to_bytes())?;
-        writer.write_all(&self.encrypted_note[..])?;
-        writer.write_all(&self.note_encryption_keys[..])?;
+        writer.write_all(&self.encrypted_note)?;
+        writer.write_all(&self.note_encryption_keys)?;
+
         Ok(())
     }
 
@@ -168,7 +183,7 @@ impl MerkleNote {
     pub fn decrypt_note_for_owner(
         &self,
         owner_view_key: &IncomingViewKey,
-    ) -> Result<Note, errors::NoteError> {
+    ) -> Result<Note, IronfishError> {
         let shared_secret = owner_view_key.shared_secret(&self.ephemeral_public_key);
         let note =
             Note::from_owner_encrypted(owner_view_key, &shared_secret, &self.encrypted_note)?;
@@ -179,7 +194,7 @@ impl MerkleNote {
     pub fn decrypt_note_for_spender(
         &self,
         spender_key: &OutgoingViewKey,
-    ) -> Result<Note, errors::NoteError> {
+    ) -> Result<Note, IronfishError> {
         let encryption_key = calculate_key_for_encryption_keys(
             spender_key,
             &self.value_commitment,
@@ -187,13 +202,8 @@ impl MerkleNote {
             &self.ephemeral_public_key,
         );
 
-        let mut note_encryption_keys = [0; ENCRYPTED_SHARED_KEY_SIZE];
-        aead::decrypt(
-            &encryption_key,
-            &self.note_encryption_keys,
-            &mut note_encryption_keys,
-        )?;
-
+        let note_encryption_keys: [u8; ENCRYPTED_SHARED_KEY_SIZE] =
+            aead::decrypt(&encryption_key, &self.note_encryption_keys)?;
         let transmission_key = PublicAddress::load_transmission_key(&note_encryption_keys[..32])?;
         let secret_key = read_scalar(&note_encryption_keys[32..])?;
         let shared_key = shared_secret(&secret_key, &transmission_key, &self.ephemeral_public_key);
@@ -233,13 +243,12 @@ pub(crate) fn position(witness: &dyn WitnessTrait) -> u64 {
     pos
 }
 
-/// Calculate the key used to encrypt the shared keys for a ReceiptProof or
-/// ReceiptParams.
+/// Calculate the key used to encrypt the shared keys for an [`crate::outputs::OutputDescription`].
 ///
 /// The shared keys are encrypted using the outgoing viewing key for the
 /// spender (the person creating the note owned by the receiver). This gets
-/// combined with hashes of the receipt values to make a key unique to, and
-/// signed by, the receipt.
+/// combined with hashes of the output values to make a key unique to, and
+/// signed by, the output.
 ///
 /// Naming is getting a bit far-fetched here because it's the keys used to
 /// encrypt other keys. Keys, all the way down!
@@ -267,67 +276,148 @@ fn calculate_key_for_encryption_keys(
 #[cfg(test)]
 mod test {
     use super::MerkleNote;
-    use crate::{
-        keys::SaplingKey,
-        note::{Memo, Note},
-    };
+    use super::NOTE_ENCRYPTION_MINER_KEYS;
+    use crate::assets::asset::NATIVE_ASSET_GENERATOR;
+    use crate::keys::EphemeralKeyPair;
+    use crate::{keys::SaplingKey, note::Note};
 
     use bls12_381::Scalar;
+    use ironfish_zkp::primitives::ValueCommitment;
     use rand::prelude::*;
-    use rand::{thread_rng, Rng};
-    use zcash_primitives::primitives::ValueCommitment;
+
+    #[test]
+    /// Test to confirm that creating a [`MerkleNote`] via new() doesn't use the
+    /// hard-coded miners fee note encryption keys
+    fn test_new_not_miners_fee_key() {
+        let spender_key = SaplingKey::generate_key();
+        let receiver_key = SaplingKey::generate_key();
+        let note = Note::new(
+            receiver_key.public_address(),
+            42,
+            "",
+            NATIVE_ASSET_GENERATOR,
+            spender_key.public_address(),
+        );
+        let diffie_hellman_keys = EphemeralKeyPair::new();
+
+        let value_commitment = ValueCommitment::new(note.value, note.asset_generator());
+
+        let merkle_note =
+            MerkleNote::new(&spender_key, &note, &value_commitment, &diffie_hellman_keys);
+
+        assert_ne!(
+            &merkle_note.note_encryption_keys,
+            NOTE_ENCRYPTION_MINER_KEYS
+        );
+    }
+
+    #[test]
+    /// Test to confirm that creating a [`MerkleNote`] via new_for_miners_note()
+    /// does use the hard-coded miners fee note encryption keys
+    fn test_new_miners_fee_key() {
+        let receiver_key = SaplingKey::generate_key();
+        let sender_key: SaplingKey = SaplingKey::generate_key();
+        let note = Note::new(
+            receiver_key.public_address(),
+            42,
+            "",
+            NATIVE_ASSET_GENERATOR,
+            sender_key.public_address(),
+        );
+        let diffie_hellman_keys = EphemeralKeyPair::new();
+
+        let value_commitment = ValueCommitment::new(note.value, note.asset_generator());
+
+        let merkle_note =
+            MerkleNote::new_for_miners_fee(&note, &value_commitment, &diffie_hellman_keys);
+
+        assert_eq!(
+            &merkle_note.note_encryption_keys,
+            NOTE_ENCRYPTION_MINER_KEYS
+        );
+    }
 
     #[test]
     fn test_view_key_encryption() {
-        let spender_key: SaplingKey = SaplingKey::generate_key();
-        let receiver_key: SaplingKey = SaplingKey::generate_key();
-        let note = Note::new(receiver_key.generate_public_address(), 42, Memo::default());
-        let diffie_hellman_keys = note.owner.generate_diffie_hellman_keys();
+        let spender_key = SaplingKey::generate_key();
+        let receiver_key = SaplingKey::generate_key();
+        let note = Note::new(
+            receiver_key.public_address(),
+            42,
+            "",
+            NATIVE_ASSET_GENERATOR,
+            spender_key.public_address(),
+        );
+        let diffie_hellman_keys = EphemeralKeyPair::new();
 
-        let mut buffer = [0u8; 64];
-        thread_rng().fill(&mut buffer[..]);
-
-        let value_commitment_randomness: jubjub::Fr = jubjub::Fr::from_bytes_wide(&buffer);
-
-        let value_commitment = ValueCommitment {
-            value: note.value,
-            randomness: value_commitment_randomness,
-        };
+        let value_commitment = ValueCommitment::new(note.value, note.asset_generator());
 
         let merkle_note =
             MerkleNote::new(&spender_key, &note, &value_commitment, &diffie_hellman_keys);
         merkle_note
             .decrypt_note_for_owner(receiver_key.incoming_view_key())
-            .expect("should be able to decrypt note");
+            .expect("should be able to decrypt note for owner");
         merkle_note
             .decrypt_note_for_spender(spender_key.outgoing_view_key())
-            .expect("should be able to decrypt note");
+            .expect("should be able to decrypt note for spender");
+
+        assert!(merkle_note
+            .decrypt_note_for_owner(spender_key.incoming_view_key())
+            .is_err());
+        assert!(merkle_note
+            .decrypt_note_for_spender(receiver_key.outgoing_view_key())
+            .is_err());
     }
 
     #[test]
-    fn test_receipt_invalid_commitment() {
-        let spender_key: SaplingKey = SaplingKey::generate_key();
-        let note = Note::new(spender_key.generate_public_address(), 42, Memo::default());
-        let diffie_hellman_keys = note.owner.generate_diffie_hellman_keys();
+    fn test_view_key_encryption_with_other_key() {
+        let spender_key = SaplingKey::generate_key();
+        let receiver_key = SaplingKey::generate_key();
+        let third_party_key = SaplingKey::generate_key();
+        let note = Note::new(
+            receiver_key.public_address(),
+            42,
+            "",
+            NATIVE_ASSET_GENERATOR,
+            spender_key.public_address(),
+        );
+        let diffie_hellman_keys = EphemeralKeyPair::new();
 
-        let mut buffer = [0u8; 64];
-        thread_rng().fill(&mut buffer[..]);
+        let value_commitment = ValueCommitment::new(note.value, note.asset_generator());
 
-        let value_commitment_randomness: jubjub::Fr = jubjub::Fr::from_bytes_wide(&buffer);
+        let merkle_note =
+            MerkleNote::new(&spender_key, &note, &value_commitment, &diffie_hellman_keys);
 
-        let value_commitment = ValueCommitment {
-            value: note.value,
-            randomness: value_commitment_randomness,
-        };
+        assert!(merkle_note
+            .decrypt_note_for_owner(third_party_key.incoming_view_key())
+            .is_err());
+        assert!(merkle_note
+            .decrypt_note_for_spender(third_party_key.outgoing_view_key())
+            .is_err());
+    }
+
+    #[test]
+    fn test_output_invalid_commitment() {
+        let spender_key = SaplingKey::generate_key();
+        let note = Note::new(
+            spender_key.public_address(),
+            42,
+            "",
+            NATIVE_ASSET_GENERATOR,
+            spender_key.public_address(),
+        );
+        let diffie_hellman_keys = EphemeralKeyPair::new();
+
+        let value_commitment = ValueCommitment::new(note.value, note.asset_generator());
 
         let mut merkle_note =
             MerkleNote::new(&spender_key, &note, &value_commitment, &diffie_hellman_keys);
         merkle_note
             .decrypt_note_for_owner(spender_key.incoming_view_key())
-            .expect("should be able to decrypt note");
+            .expect("should be able to decrypt note for owner");
         merkle_note
             .decrypt_note_for_spender(spender_key.outgoing_view_key())
-            .expect("should be able to decrypt note");
+            .expect("should be able to decrypt note for spender");
 
         // should fail if note_commitment doesn't match
         let note_randomness: u64 = random();

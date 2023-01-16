@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { RpcRequestError } from '../rpc/clients/errors'
-
 /**
  * This is used to unwrap a message from an error
  *
@@ -41,7 +40,15 @@ function isConnectRefusedError(error: unknown): error is Error & { code: 'ECONNR
   return isNodeError(error) && error.code === 'ECONNREFUSED'
 }
 
-function isNoEntityError(error: unknown): error is Error & { code: 'NOENT' } {
+function isConnectResetError(error: unknown): error is Error & { code: 'ECONNRESET' } {
+  return isNodeError(error) && error.code === 'ECONNRESET'
+}
+
+function isConnectTimeOutError(error: unknown): error is Error & { code: 'ETIMEDOUT' } {
+  return isNodeError(error) && error.code === 'ETIMEDOUT'
+}
+
+function isNoEntityError(error: unknown): error is Error & { code: 'ENOENT' } {
   return isNodeError(error) && error.code === 'ENOENT'
 }
 
@@ -52,6 +59,8 @@ function isNodeError(error: unknown): error is Error & { code: string } {
 export const ErrorUtils = {
   renderError,
   isConnectRefusedError,
+  isConnectResetError,
+  isConnectTimeOutError,
   isNoEntityError,
   isNodeError,
 }

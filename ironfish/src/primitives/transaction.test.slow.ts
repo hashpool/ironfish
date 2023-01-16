@@ -1,13 +1,15 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+import { Asset } from '@ironfish/rust-nodejs'
+import { Assert } from '../assert'
 import { createNodeTest, useAccountFixture, useMinerBlockFixture } from '../testUtilities'
 
 describe('Accounts', () => {
   const nodeTest = createNodeTest()
 
   it('produces unique transaction hashes', async () => {
-    const account = await useAccountFixture(nodeTest.accounts)
+    const account = await useAccountFixture(nodeTest.wallet)
 
     const transactionA = await nodeTest.strategy.createMinersFee(
       BigInt(0),
@@ -25,10 +27,10 @@ describe('Accounts', () => {
     const hashB = transactionB.unsignedHash()
 
     expect(hashA.equals(hashB)).toBe(false)
-  }, 600000)
+  })
 
   it('check if a transaction is a miners fee', async () => {
-    const account = await useAccountFixture(nodeTest.accounts)
+    const account = await useAccountFixture(nodeTest.wallet)
 
     const transactionA = await nodeTest.strategy.createMinersFee(
       BigInt(0),
@@ -46,34 +48,75 @@ describe('Accounts', () => {
     expect(transactionB.isMinersFee()).toBe(true)
   })
 
-  it('check if a transaction is not a miners fee', async () => {
+  it('throw error if account is not fully synced when creating transaction', async () => {
     const nodeA = nodeTest.node
 
     // Create an account A
-    const accountA = await useAccountFixture(nodeA.accounts, () =>
-      nodeA.accounts.createAccount('testA'),
-    )
-    const accountB = await useAccountFixture(nodeA.accounts, () =>
-      nodeA.accounts.createAccount('testB'),
-    )
+    const accountA = await useAccountFixture(nodeA.wallet, 'testA')
+    const accountB = await useAccountFixture(nodeA.wallet, 'testB')
 
     // Create a block with a miner's fee
     const block1 = await useMinerBlockFixture(nodeA.chain, 2, accountA)
     await nodeA.chain.addBlock(block1)
-    await nodeA.accounts.updateHead()
+    await nodeA.wallet.updateHead()
+    const headhash = await nodeA.wallet.getLatestHeadHash()
+    Assert.isNotNull(headhash)
+    // Modify the headhash
+    headhash[0] = 0
+    await accountA.updateHead({ hash: headhash, sequence: 2 })
 
-    const transaction = await nodeA.accounts.createTransaction(
+    const response = nodeA.wallet.createTransaction(
       accountA,
       [
         {
           publicAddress: accountB.publicAddress,
           amount: BigInt(1),
           memo: '',
+          assetId: Asset.nativeId(),
         },
       ],
+      [],
+      [],
       BigInt(1),
       0,
     )
+    await expect(response).rejects.toThrow(Error)
+  })
+
+  it('check if a transaction is not a miners fee', async () => {
+    const nodeA = nodeTest.node
+
+    // Create an account A
+    const accountA = await useAccountFixture(nodeA.wallet, () =>
+      nodeA.wallet.createAccount('testA'),
+    )
+    const accountB = await useAccountFixture(nodeA.wallet, () =>
+      nodeA.wallet.createAccount('testB'),
+    )
+
+    // Create a block with a miner's fee
+    const block1 = await useMinerBlockFixture(nodeA.chain, 2, accountA)
+    await nodeA.chain.addBlock(block1)
+    await nodeA.wallet.updateHead()
+
+    const raw = await nodeA.wallet.createTransaction(
+      accountA,
+      [
+        {
+          publicAddress: accountB.publicAddress,
+          amount: BigInt(1),
+          memo: '',
+          assetId: Asset.nativeId(),
+        },
+      ],
+      [],
+      [],
+      BigInt(1),
+      0,
+    )
+
+    const transaction = await nodeA.wallet.postTransaction(raw)
+
     expect(transaction.isMinersFee()).toBe(false)
-  }, 600000)
+  })
 })

@@ -4,11 +4,34 @@
 
 import { IJsonSerializable } from '../../serde'
 
-export type DatabaseKey = bigint | number | string | Date | Buffer | Array<IJsonSerializable>
+export interface DatabaseKeyRange {
+  gt?: Buffer
+  gte?: Buffer
+  lt?: Buffer
+  lte?: Buffer
+}
 
-export type DatabaseSchema = {
-  key: DatabaseKey
-  value: unknown
+export interface DatabaseIteratorOptions {
+  reverse?: boolean
+  limit?: number
+  ordered?: boolean
+}
+
+export type DatabaseKey =
+  | bigint
+  | number
+  | string
+  | Date
+  | Buffer
+  | Array<IJsonSerializable>
+  | unknown
+
+export type DatabaseSchema<
+  key extends DatabaseKey = DatabaseKey,
+  value extends unknown = unknown,
+> = {
+  key: key
+  value: value
 }
 
 export type SchemaKey<Schema extends DatabaseSchema> = Schema['key']

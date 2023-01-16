@@ -2,14 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 import { ThreadPoolHandler } from '@ironfish/rust-nodejs'
-import { isValidPublicAddress } from '../account/validator'
 import { Assert } from '../assert'
 import { Logger } from '../logger'
 import { Meter } from '../metrics/meter'
 import { FileUtils } from '../utils/file'
 import { GraffitiUtils } from '../utils/graffiti'
 import { PromiseUtils } from '../utils/promise'
+import { isValidPublicAddress } from '../wallet/validator'
 import { StratumClient } from './stratum/stratumClient'
+import { MINEABLE_BLOCK_HEADER_GRAFFITI_OFFSET } from './utils'
 
 export class MiningPoolMiner {
   readonly hashRate: Meter
@@ -121,7 +122,7 @@ export class MiningPoolMiner {
     )
 
     const headerBytes = Buffer.concat([header])
-    headerBytes.set(this.graffiti, 176)
+    headerBytes.set(this.graffiti, MINEABLE_BLOCK_HEADER_GRAFFITI_OFFSET)
 
     this.waiting = false
     this.threadPool.newWork(headerBytes, this.target, miningRequestId)

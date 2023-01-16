@@ -11,7 +11,6 @@ import { RpcRequest } from '../request'
 import { RpcServer } from '../server'
 
 export enum ApiNamespace {
-  account = 'account',
   chain = 'chain',
   config = 'config',
   event = 'event',
@@ -19,8 +18,7 @@ export enum ApiNamespace {
   miner = 'miner',
   node = 'node',
   peer = 'peer',
-  transaction = 'transaction',
-  telemetry = 'telemetry',
+  wallet = 'wallet',
   worker = 'worker',
   rpc = 'rpc',
 }

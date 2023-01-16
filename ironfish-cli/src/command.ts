@@ -4,21 +4,21 @@
 import {
   ConfigOptions,
   createRootLogger,
+  DatabaseVersionError,
   ErrorUtils,
+  InternalOptions,
   IronfishSdk,
   Logger,
   RpcConnectionError,
 } from '@ironfish/sdk'
 import { Command, Config } from '@oclif/core'
+import { CLIError, ExitError } from '@oclif/core/lib/errors'
 import {
   ConfigFlagKey,
-  DatabaseFlag,
-  DatabaseFlagKey,
   DataDirFlagKey,
+  RpcAuthFlagKey,
   RpcTcpHostFlagKey,
   RpcTcpPortFlagKey,
-  RpcTcpSecureFlag,
-  RpcTcpSecureFlagKey,
   RpcTcpTlsFlag,
   RpcTcpTlsFlagKey,
   RpcUseIpcFlag,
@@ -35,15 +35,14 @@ export type SIGNALS = 'SIGTERM' | 'SIGINT' | 'SIGUSR2'
 
 export type FLAGS =
   | typeof DataDirFlagKey
-  | typeof DatabaseFlagKey
   | typeof ConfigFlagKey
   | typeof RpcUseIpcFlagKey
   | typeof RpcUseTcpFlagKey
   | typeof RpcTcpHostFlagKey
   | typeof RpcTcpPortFlagKey
-  | typeof RpcTcpSecureFlagKey
   | typeof RpcTcpTlsFlagKey
   | typeof VerboseFlagKey
+  | typeof RpcAuthFlagKey
 
 export abstract class IronfishCommand extends Command {
   // Yes, this is disabling the type system but any code
@@ -75,8 +74,19 @@ export abstract class IronfishCommand extends Command {
     } catch (error: unknown) {
       if (hasUserResponseError(error)) {
         this.log(error.codeMessage)
+      } else if (error instanceof ExitError) {
+        throw error
+      } else if (error instanceof CLIError) {
+        throw error
       } else if (error instanceof RpcConnectionError) {
         this.log(`Cannot connect to your node, start your node first.`)
+      } else if (error instanceof DatabaseVersionError) {
+        this.log(error.message)
+        this.exit(1)
+      } else if (error instanceof Error) {
+        // eslint-disable-next-line no-console
+        console.error(ErrorUtils.renderError(error, true))
+        this.exit(1)
       } else {
         throw error
       }
@@ -96,11 +106,7 @@ export abstract class IronfishCommand extends Command {
     const configFlag = getFlag(flags, ConfigFlagKey)
 
     const configOverrides: Partial<ConfigOptions> = {}
-
-    const databaseNameFlag = getFlag(flags, DatabaseFlagKey)
-    if (typeof databaseNameFlag === 'string' && databaseNameFlag !== DatabaseFlag.default) {
-      configOverrides.databaseName = databaseNameFlag
-    }
+    const internalOverrides: Partial<InternalOptions> = {}
 
     const rpcConnectIpcFlag = getFlag(flags, RpcUseIpcFlagKey)
     if (typeof rpcConnectIpcFlag === 'boolean' && rpcConnectIpcFlag !== RpcUseIpcFlag.default) {
@@ -122,14 +128,6 @@ export abstract class IronfishCommand extends Command {
       configOverrides.rpcTcpPort = rpcTcpPortFlag
     }
 
-    const rpcTcpSecureFlag = getFlag(flags, RpcTcpSecureFlagKey)
-    if (
-      typeof rpcTcpSecureFlag === 'boolean' &&
-      rpcTcpSecureFlag !== RpcTcpSecureFlag.default
-    ) {
-      configOverrides.rpcTcpSecure = rpcTcpSecureFlag
-    }
-
     const rpcTcpTlsFlag = getFlag(flags, RpcTcpTlsFlagKey)
     if (typeof rpcTcpTlsFlag === 'boolean' && rpcTcpTlsFlag !== RpcTcpTlsFlag.default) {
       configOverrides.enableRpcTls = rpcTcpTlsFlag
@@ -140,9 +138,15 @@ export abstract class IronfishCommand extends Command {
       configOverrides.logLevel = '*:verbose'
     }
 
+    const rpcAuthFlag = getFlag(flags, RpcAuthFlagKey)
+    if (typeof rpcAuthFlag === 'string') {
+      internalOverrides.rpcAuthToken = rpcAuthFlag
+    }
+
     this.sdk = await IronfishSdk.init({
       pkg: IronfishCliPKG,
       configOverrides: configOverrides,
+      internalOverrides: internalOverrides,
       configName: typeof configFlag === 'string' ? configFlag : undefined,
       dataDir: typeof dataDirFlag === 'string' ? dataDirFlag : undefined,
       logger: this.logger,

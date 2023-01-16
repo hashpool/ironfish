@@ -3,40 +3,22 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 import * as yup from 'yup'
 import { FileSystem } from '../fileSystems'
+import { YupUtils } from '../utils'
 import { KeyStore } from './keyStore'
 
 export const DEFAULT_CONFIG_NAME = 'config.json'
-export const DEFAULT_DATABASE_NAME = 'default'
 export const DEFAULT_DATA_DIR = '~/.ironfish'
-export const DEFAULT_WALLET_NAME = 'default'
 export const DEFAULT_WEBSOCKET_PORT = 9033
-export const DEFAULT_GET_FUNDS_API = 'https://api.ironfish.network/faucet_transactions'
-export const DEFAULT_TELEMETRY_API = 'https://api.ironfish.network/telemetry'
-export const DEFAULT_BOOTSTRAP_NODE = 'test.bn1.ironfish.network'
-export const DEFAULT_DISCORD_INVITE = 'https://discord.gg/ironfish'
+export const DEFAULT_DISCORD_INVITE = 'https://discord.ironfish.network'
 export const DEFAULT_USE_RPC_IPC = true
 export const DEFAULT_USE_RPC_TCP = false
 export const DEFAULT_USE_RPC_TLS = true
-export const DEFAULT_MINER_BATCH_SIZE = 25000
-export const DEFAULT_EXPLORER_BLOCKS_URL = 'https://explorer.ironfish.network/blocks/'
-export const DEFAULT_EXPLORER_TRANSACTIONS_URL =
-  'https://explorer.ironfish.network/transaction/'
-
-// Pool defaults
-export const DEFAULT_POOL_NAME = 'Iron Fish Pool'
-export const DEFAULT_POOL_ACCOUNT_NAME = 'default'
-export const DEFAULT_POOL_BALANCE_PERCENT_PAYOUT = 10
 export const DEFAULT_POOL_HOST = '0.0.0.0'
 export const DEFAULT_POOL_PORT = 9034
-export const DEFAULT_POOL_DIFFICULTY = '15000000000'
-export const DEFAULT_POOL_ATTEMPT_PAYOUT_INTERVAL = 15 * 60 // 15 minutes
-export const DEFAULT_POOL_SUCCESSFUL_PAYOUT_INTERVAL = 2 * 60 * 60 // 2 hours
-export const DEFAULT_POOL_STATUS_NOTIFICATION_INTERVAL = 30 * 60 // 30 minutes
-export const DEFAULT_POOL_RECENT_SHARE_CUTOFF = 2 * 60 * 60 // 2 hours
 
 export type ConfigOptions = {
   bootstrapNodes: string[]
-  databaseName: string
+  databaseMigrate: boolean
   editor: string
   enableListenP2P: boolean
   enableLogFile: boolean
@@ -102,7 +84,6 @@ export type ConfigOptions = {
   peerPort: number
   rpcTcpHost: string
   rpcTcpPort: number
-  rpcTcpSecure: boolean
   tlsKeyPath: string
   tlsCertPath: string
   /**
@@ -117,7 +98,6 @@ export type ConfigOptions = {
    */
   targetPeers: number
   telemetryApi: string
-  accountName: string
 
   /**
    * When the option is true, then each invocation of start command will invoke generation of new identity.
@@ -130,7 +110,7 @@ export type ConfigOptions = {
    * The default delta of block sequence for which to expire transactions from the
    * mempool.
    */
-  defaultTransactionExpirationSequenceDelta: number
+  transactionExpirationDelta: number
 
   /**
    * The default number of blocks to request per message when syncing.
@@ -146,7 +126,7 @@ export type ConfigOptions = {
    * The minimum number of block confirmations needed when computing account
    * balance.
    */
-  minimumBlockConfirmations: number
+  confirmations: number
 
   /**
    * The name that the pool will use in block graffiti and transaction memo.
@@ -216,7 +196,6 @@ export type ConfigOptions = {
   poolMaxConnectionsPerIp: number
 
   /**
-
    * The lark webhook URL to post pool critical pool information to
    */
   poolLarkWebhook: ''
@@ -236,14 +215,101 @@ export type ConfigOptions = {
    * URL for viewing transaction information in a block explorer
    */
   explorerTransactionsUrl: string
+
+  feeEstimatorMaxBlockHistory: number
+  feeEstimatorPercentileLow: number
+  feeEstimatorPercentileMedium: number
+  feeEstimatorPercentileHigh: number
+
+  /**
+   * Network ID of an official Iron Fish network
+   */
+  networkId: number
+
+  /**
+   * Path to a JSON file containing the network definition of a custom network
+   */
+  customNetwork: string
+
+  /**
+   * The oldest the tip should be before we consider the chain synced
+   */
+  maxSyncedAgeBlocks: number
+
+  networkDefinitionPath: string
 }
 
 export const ConfigOptionsSchema: yup.ObjectSchema<Partial<ConfigOptions>> = yup
-  .object()
-  .shape({})
+  .object({
+    bootstrapNodes: yup.array().of(yup.string().defined()),
+    databaseMigrate: yup.boolean(),
+    editor: yup.string().trim(),
+    enableListenP2P: yup.boolean(),
+    enableLogFile: yup.boolean(),
+    enableRpc: yup.boolean(),
+    enableRpcIpc: yup.boolean(),
+    enableRpcTcp: yup.boolean(),
+    enableRpcTls: yup.boolean(),
+    enableSyncing: yup.boolean(),
+    enableTelemetry: yup.boolean(),
+    enableMetrics: yup.boolean(),
+    getFundsApi: yup.string(),
+    ipcPath: yup.string().trim(),
+    miningForce: yup.boolean(),
+    logPeerMessages: yup.boolean(),
+    // validated separately by logLevelParser
+    logLevel: yup.string(),
+    // not applying a regex pattern to avoid getting out of sync with logic
+    // to parse logPrefix
+    logPrefix: yup.string(),
+    blockGraffiti: yup.string(),
+    nodeName: yup.string(),
+    nodeWorkers: yup.number().integer().min(-1),
+    nodeWorkersMax: yup.number().integer().min(-1),
+    p2pSimulateLatency: YupUtils.isPositiveInteger,
+    peerPort: YupUtils.isPort,
+    rpcTcpHost: yup.string().trim(),
+    rpcTcpPort: YupUtils.isPort,
+    tlsKeyPath: yup.string().trim(),
+    tlsCertPath: yup.string().trim(),
+    maxPeers: YupUtils.isPositiveInteger,
+    minPeers: YupUtils.isPositiveInteger,
+    targetPeers: yup.number().integer().min(1),
+    telemetryApi: yup.string(),
+    generateNewIdentity: yup.boolean(),
+    transactionExpirationDelta: YupUtils.isPositiveInteger,
+    blocksPerMessage: YupUtils.isPositiveInteger,
+    minerBatchSize: YupUtils.isPositiveInteger,
+    confirmations: YupUtils.isPositiveInteger,
+    poolName: yup.string(),
+    poolAccountName: yup.string(),
+    poolBanning: yup.boolean(),
+    poolBalancePercentPayout: YupUtils.isPercent,
+    poolHost: yup.string().trim(),
+    poolPort: YupUtils.isPort,
+    poolDifficulty: yup.string(),
+    poolAttemptPayoutInterval: YupUtils.isPositiveInteger,
+    poolSuccessfulPayoutInterval: YupUtils.isPositiveInteger,
+    poolStatusNotificationInterval: YupUtils.isPositiveInteger,
+    poolRecentShareCutoff: YupUtils.isPositiveInteger,
+    poolDiscordWebhook: yup.string(),
+    poolMaxConnectionsPerIp: YupUtils.isPositiveInteger,
+    poolLarkWebhook: yup.string(),
+    jsonLogs: yup.boolean(),
+    explorerBlocksUrl: YupUtils.isUrl,
+    explorerTransactionsUrl: YupUtils.isUrl,
+    networkId: yup.number().integer().min(0),
+    customNetwork: yup.string().trim(),
+    maxSyncedAgeBlocks: yup.number().integer().min(0),
+    networkDefinitionPath: yup.string().trim(),
+  })
   .defined()
 
 export class Config extends KeyStore<ConfigOptions> {
+  readonly chainDatabasePath: string
+  readonly walletDatabasePath: string
+  readonly tempDir: string
+
   constructor(files: FileSystem, dataDir: string, configName?: string) {
     super(
       files,
@@ -252,25 +318,17 @@ export class Config extends KeyStore<ConfigOptions> {
       dataDir,
       ConfigOptionsSchema,
     )
-  }
 
-  get chainDatabasePath(): string {
-    return this.files.join(this.storage.dataDir, 'databases', this.get('databaseName'))
-  }
-
-  get accountDatabasePath(): string {
-    return this.files.join(this.storage.dataDir, 'accounts', this.get('accountName'))
-  }
-
-  get indexDatabasePath(): string {
-    return this.files.join(this.storage.dataDir, 'indexes', this.get('databaseName'))
+    this.chainDatabasePath = this.files.join(this.storage.dataDir, 'databases', 'chain')
+    this.walletDatabasePath = this.files.join(this.storage.dataDir, 'databases', 'wallet')
+    this.tempDir = this.files.join(this.storage.dataDir, 'temp')
   }
 
   static GetDefaults(files: FileSystem, dataDir: string): ConfigOptions {
     return {
-      bootstrapNodes: [DEFAULT_BOOTSTRAP_NODE],
-      databaseName: DEFAULT_DATABASE_NAME,
-      defaultTransactionExpirationSequenceDelta: 15,
+      bootstrapNodes: [],
+      databaseMigrate: false,
+      transactionExpirationDelta: 15,
       editor: '',
       enableListenP2P: true,
       enableLogFile: false,
@@ -281,7 +339,7 @@ export class Config extends KeyStore<ConfigOptions> {
       enableSyncing: true,
       enableTelemetry: false,
       enableMetrics: true,
-      getFundsApi: DEFAULT_GET_FUNDS_API,
+      getFundsApi: 'https://api.ironfish.network/faucet_transactions',
       ipcPath: files.resolve(files.join(dataDir, 'ironfish.ipc')),
       logLevel: '*:info',
       logPeerMessages: false,
@@ -295,35 +353,41 @@ export class Config extends KeyStore<ConfigOptions> {
       peerPort: DEFAULT_WEBSOCKET_PORT,
       rpcTcpHost: 'localhost',
       rpcTcpPort: 8020,
-      rpcTcpSecure: false,
       tlsKeyPath: files.resolve(files.join(dataDir, 'certs', 'node-key.pem')),
       tlsCertPath: files.resolve(files.join(dataDir, 'certs', 'node-cert.pem')),
       maxPeers: 50,
-      minimumBlockConfirmations: 12,
+      confirmations: 2,
       minPeers: 1,
       targetPeers: 50,
-      telemetryApi: DEFAULT_TELEMETRY_API,
-      accountName: DEFAULT_WALLET_NAME,
+      telemetryApi: 'https://api.ironfish.network/telemetry',
       generateNewIdentity: false,
-      blocksPerMessage: 20,
-      minerBatchSize: DEFAULT_MINER_BATCH_SIZE,
-      poolName: DEFAULT_POOL_NAME,
-      poolAccountName: DEFAULT_POOL_ACCOUNT_NAME,
+      blocksPerMessage: 5,
+      minerBatchSize: 25000,
+      poolName: 'Iron Fish Pool',
+      poolAccountName: 'default',
       poolBanning: true,
-      poolBalancePercentPayout: DEFAULT_POOL_BALANCE_PERCENT_PAYOUT,
+      poolBalancePercentPayout: 10,
       poolHost: DEFAULT_POOL_HOST,
       poolPort: DEFAULT_POOL_PORT,
-      poolDifficulty: DEFAULT_POOL_DIFFICULTY,
-      poolAttemptPayoutInterval: DEFAULT_POOL_ATTEMPT_PAYOUT_INTERVAL,
-      poolSuccessfulPayoutInterval: DEFAULT_POOL_SUCCESSFUL_PAYOUT_INTERVAL,
-      poolStatusNotificationInterval: DEFAULT_POOL_STATUS_NOTIFICATION_INTERVAL,
-      poolRecentShareCutoff: DEFAULT_POOL_RECENT_SHARE_CUTOFF,
+      poolDifficulty: '15000000000',
+      poolAttemptPayoutInterval: 15 * 60, // 15 minutes
+      poolSuccessfulPayoutInterval: 2 * 60 * 60, // 2 hours
+      poolStatusNotificationInterval: 30 * 60, // 30 minutes
+      poolRecentShareCutoff: 2 * 60 * 60, // 2 hours
       poolDiscordWebhook: '',
       poolMaxConnectionsPerIp: 0,
       poolLarkWebhook: '',
       jsonLogs: false,
-      explorerBlocksUrl: DEFAULT_EXPLORER_BLOCKS_URL,
-      explorerTransactionsUrl: DEFAULT_EXPLORER_TRANSACTIONS_URL,
+      explorerBlocksUrl: 'https://explorer.ironfish.network/blocks/',
+      explorerTransactionsUrl: 'https://explorer.ironfish.network/transaction/',
+      feeEstimatorMaxBlockHistory: 10,
+      feeEstimatorPercentileLow: 10,
+      feeEstimatorPercentileMedium: 20,
+      feeEstimatorPercentileHigh: 30,
+      networkId: 2,
+      customNetwork: '',
+      maxSyncedAgeBlocks: 60,
+      networkDefinitionPath: files.resolve(files.join(dataDir, 'network.json')),
     }
   }
 }

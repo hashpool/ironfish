@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import LRU from 'blru'
 import { Assert } from '../assert'
 import { JsonSerializable } from '../serde'
 import {
@@ -10,12 +11,19 @@ import {
   IDatabaseEncoding,
   IDatabaseStore,
   IDatabaseTransaction,
+  LevelupTransaction,
   SchemaValue,
   StringEncoding,
   U32_ENCODING,
 } from '../storage'
 import { MerkleHasher } from './hasher'
-import { CounterSchema, LeavesIndexSchema, LeavesSchema, NodesSchema } from './schema'
+import {
+  CounterSchema,
+  LeavesIndexSchema,
+  LeavesSchema,
+  NodesSchema,
+  NodeValue,
+} from './schema'
 import { depthAtLeafCount, isEmpty, isRight } from './utils'
 import { Witness, WitnessNode } from './witness'
 
@@ -29,11 +37,18 @@ export class MerkleTree<
   readonly db: IDatabase
   readonly name: string = ''
   readonly depth: number = 32
+  readonly defaultValue: H
 
   readonly counter: IDatabaseStore<CounterSchema>
-  readonly leaves: IDatabaseStore<LeavesSchema<E, H>>
+  readonly leaves: IDatabaseStore<LeavesSchema<H>>
   readonly leavesIndex: IDatabaseStore<LeavesIndexSchema<H>>
   readonly nodes: IDatabaseStore<NodesSchema<H>>
+
+  private readonly pastRootCache: LRU<number, H> = new LRU<number, H>(300 * 60)
+  private readonly transactionPastRootCache: LRU<number, Map<number, H>> = new LRU<
+    number,
+    Map<number, H>
+  >(5)
 
   constructor({
     hasher,
@@ -41,14 +56,16 @@ export class MerkleTree<
     leafEncoding,
     leafIndexKeyEncoding,
     nodeEncoding,
+    defaultValue,
     name = '',
     depth = 32,
   }: {
     hasher: MerkleHasher<E, H, SE, SH>
     db: IDatabase
-    leafEncoding: IDatabaseEncoding<LeavesSchema<E, H>['value']>
+    leafEncoding: IDatabaseEncoding<LeavesSchema<H>['value']>
     leafIndexKeyEncoding: IDatabaseEncoding<LeavesIndexSchema<H>['key']>
     nodeEncoding: IDatabaseEncoding<NodesSchema<H>['value']>
+    defaultValue: H
     name?: string
     depth?: number
   }) {
@@ -56,6 +73,7 @@ export class MerkleTree<
     this.db = db
     this.name = name
     this.depth = depth
+    this.defaultValue = defaultValue
 
     this.counter = db.addStore({
       name: `${name}c`,
@@ -82,37 +100,13 @@ export class MerkleTree<
     })
   }
 
-  async upgrade(): Promise<void> {
-    if ((await this.counter.get('Leaves')) === undefined) {
-      await this.counter.put('Leaves', 0)
-    }
-
-    if ((await this.counter.get('Nodes')) === undefined) {
-      await this.counter.put('Nodes', 1)
-    }
-  }
-
   /**
    * Get the number of leaf nodes (elements) in the tree.
    */
   async size(tx?: IDatabaseTransaction): Promise<number> {
     return await this.db.withTransaction(tx, async (tx) => {
-      const value = await this.counter.get('Leaves', tx)
-
-      if (value === undefined) {
-        throw new Error(`No counter record found for tree ${this.name}`)
-      }
-
-      return value
+      return await this.getCount('Leaves', tx)
     })
-  }
-
-  /**
-   * Get the leaf element at the given index. Throws an error if the
-   * index is not in bounds.
-   */
-  async get(position: LeafIndex, tx?: IDatabaseTransaction): Promise<E> {
-    return (await this.getLeaf(position, tx)).element
   }
 
   /**
@@ -122,7 +116,7 @@ export class MerkleTree<
   async getLeaf(
     index: LeafIndex,
     tx?: IDatabaseTransaction,
-  ): Promise<SchemaValue<LeavesSchema<E, H>>> {
+  ): Promise<SchemaValue<LeavesSchema<H>>> {
     const leaf = await this.getLeafOrNull(index, tx)
     if (!leaf) {
       throw new Error(`No leaf found in tree ${this.name} at index ${index}`)
@@ -137,7 +131,7 @@ export class MerkleTree<
   async getLeafOrNull(
     index: LeafIndex,
     tx?: IDatabaseTransaction,
-  ): Promise<SchemaValue<LeavesSchema<E, H>> | null> {
+  ): Promise<SchemaValue<LeavesSchema<H>> | null> {
     return await this.db.withTransaction(tx, async (tx) => {
       const leaf = await this.leaves.get(index, tx)
       return leaf || null
@@ -176,33 +170,42 @@ export class MerkleTree<
    * count is not in the store.
    */
   async getCount(countType: 'Leaves' | 'Nodes', tx?: IDatabaseTransaction): Promise<LeafIndex> {
-    const count = await this.counter.get(countType, tx)
+    let count = await this.counter.get(countType, tx)
+
     if (count === undefined) {
-      throw new Error(`No counts found in tree ${this.name} for type ${countType}`)
-    }
-    return count
-  }
-
-  /** Iterate over all notes in the tree. This happens asynchronously
-   * and behaviour is undefined if the tree changes while iterating.
-   */
-  async *notes(tx?: IDatabaseTransaction): AsyncGenerator<E, void, unknown> {
-    const numLeaves = await this.size(tx)
-
-    for (let index = 0; index < numLeaves; index++) {
-      const leaf = await this.getLeafOrNull(index, tx)
-      if (leaf === null) {
-        return
+      if (countType === 'Leaves') {
+        count = 0
+      } else if (countType === 'Nodes') {
+        count = 1
+      } else {
+        Assert.isNever(countType)
       }
 
-      yield leaf.element
+      await this.counter.put(countType, count, tx)
     }
+
+    return count
   }
 
   /**
    * Add the new leaf element into the tree, and update all hashes.
    */
   async add(element: E, tx?: IDatabaseTransaction): Promise<void> {
+    await this.db.withTransaction(tx, async (tx) => {
+      const startingLeafIndex = await this.size(tx)
+
+      await this.addLeafWithNodes(element, tx)
+
+      await this.hashTree(startingLeafIndex, tx)
+    })
+  }
+
+  /**
+   * Add the new leaf element into the tree, creating new nodes if necessary.
+   *
+   * Requires running hashTree to update the tree's hash values.
+   */
+  private async addLeafWithNodes(element: E, tx?: IDatabaseTransaction): Promise<void> {
     await this.db.withTransaction(tx, async (tx) => {
       const merkleHash = this.hasher.merkleHash(element)
       const indexOfNewLeaf = await this.getCount('Leaves', tx)
@@ -218,7 +221,7 @@ export class MerkleTree<
 
         const leftLeafIndex = 0
         const leftLeaf = await this.getLeaf(leftLeafIndex, tx)
-        const hashOfSibling = this.hasher.combineHash(0, leftLeaf.merkleHash, merkleHash)
+        const hashOfSibling = this.defaultValue
 
         await this.nodes.put(
           newParentIndex,
@@ -233,7 +236,6 @@ export class MerkleTree<
         await this.addLeaf(
           leftLeafIndex,
           {
-            element: leftLeaf.element,
             merkleHash: leftLeaf.merkleHash,
             parentIndex: newParentIndex,
           },
@@ -254,8 +256,6 @@ export class MerkleTree<
         let previousParentIndex = previousLeaf.parentIndex
 
         let nextNodeIndex = await this.getCount('Nodes', tx)
-        let myHash = this.hasher.combineHash(0, merkleHash, merkleHash)
-        let depth = 1
         let shouldContinue = true
 
         newParentIndex = nextNodeIndex
@@ -281,11 +281,7 @@ export class MerkleTree<
               const newParent = {
                 side: Side.Left,
                 parentIndex: 0,
-                hashOfSibling: this.hasher.combineHash(
-                  depth,
-                  previousParent.hashOfSibling,
-                  myHash,
-                ),
+                hashOfSibling: this.defaultValue,
                 index: nextNodeIndex,
               }
 
@@ -308,8 +304,6 @@ export class MerkleTree<
             shouldContinue = false
           } else {
             // previous parent is a right node, gotta go up a step
-            myHash = this.hasher.combineHash(depth, myHash, myHash)
-
             if (previousParent.leftIndex === undefined) {
               throw new Error(`Parent has no left sibling`)
             }
@@ -324,7 +318,7 @@ export class MerkleTree<
             const newNode = {
               side: Side.Left,
               parentIndex: nextNodeIndex + 1, // where the next node will be (in the next iteration)
-              hashOfSibling: myHash,
+              hashOfSibling: this.defaultValue,
               index: nextNodeIndex,
             }
             await this.nodes.put(nextNodeIndex, newNode, tx)
@@ -334,7 +328,6 @@ export class MerkleTree<
             await this.counter.put('Nodes', nextNodeIndex, tx)
 
             previousParentIndex = leftSiblingParentIndex
-            depth += 1
           }
         }
       }
@@ -344,26 +337,34 @@ export class MerkleTree<
       await this.addLeaf(
         indexOfNewLeaf,
         {
-          element,
           merkleHash,
           parentIndex: newParentIndex,
         },
         tx,
       )
-
-      await this.rehashRightPath(tx)
     })
   }
 
-  async addLeaf(
-    index: LeavesSchema<E, H>['key'],
-    value: LeavesSchema<E, H>['value'],
+  async addBatch(elements: Iterable<E>, tx?: IDatabaseTransaction): Promise<void> {
+    await this.db.withTransaction(tx, async (tx) => {
+      const startingLeafIndex = await this.size(tx)
+
+      for (const element of elements) {
+        await this.addLeafWithNodes(element, tx)
+      }
+
+      await this.hashTree(startingLeafIndex, tx)
+    })
+  }
+
+  private async addLeaf(
+    index: LeavesSchema<H>['key'],
+    value: LeavesSchema<H>['value'],
     tx?: IDatabaseTransaction,
   ): Promise<void> {
     await this.leaves.put(
       index,
       {
-        element: value.element,
         merkleHash: value.merkleHash,
         parentIndex: value.parentIndex,
       },
@@ -385,6 +386,7 @@ export class MerkleTree<
    * grows.
    */
   async truncate(pastSize: number, tx?: IDatabaseTransaction): Promise<void> {
+    this.invalidatePastRootCache(pastSize, tx)
     return await this.db.withTransaction(tx, async (tx) => {
       const oldSize = await this.getCount('Leaves', tx)
 
@@ -445,8 +447,55 @@ export class MerkleTree<
       parent.parentIndex = 0
       await this.nodes.put(parentIndex, parent, tx)
       await this.counter.put('Nodes', maxParentIndex + 1, tx)
-      await this.rehashRightPath(tx)
+      await this.hashTree(pastSize - 1, tx)
     })
+  }
+
+  // Invalidate and pastSize entries greater than maxSize
+  private invalidatePastRootCache(maxSize: number, tx?: IDatabaseTransaction): void {
+    if (tx instanceof LevelupTransaction) {
+      const local = this.transactionPastRootCache.get(tx.id)
+      for (const pastSize of local?.keys() || []) {
+        if (pastSize > maxSize) {
+          local?.delete(pastSize)
+        }
+      }
+    }
+
+    for (const pastSize of this.pastRootCache.keys()) {
+      if (pastSize > maxSize) {
+        this.pastRootCache.remove(pastSize)
+      }
+    }
+  }
+
+  private setPastRootCache(pastSize: number, hash: H, tx: IDatabaseTransaction): void {
+    if (tx instanceof LevelupTransaction) {
+      const cache = this.transactionPastRootCache.get(tx.id) || new Map<number, H>()
+      cache.set(pastSize, hash)
+      this.transactionPastRootCache.set(tx.id, cache)
+    }
+  }
+
+  private getPastRootCache(pastSize: number, tx?: IDatabaseTransaction): H | null {
+    if (tx instanceof LevelupTransaction) {
+      const local = this.transactionPastRootCache.get(tx.id)
+      const localResult = local && local.get(pastSize)
+
+      return localResult || this.pastRootCache.get(pastSize)
+    }
+
+    return this.pastRootCache.get(pastSize)
+  }
+
+  pastRootTxCommitted(tx: IDatabaseTransaction): void {
+    if (tx instanceof LevelupTransaction) {
+      const local = this.transactionPastRootCache.get(tx.id)
+      for (const [pastSize, hash] of local?.entries() || []) {
+        this.pastRootCache.set(pastSize, hash)
+      }
+      this.transactionPastRootCache.remove(tx.id)
+    }
   }
 
   /**
@@ -461,6 +510,11 @@ export class MerkleTree<
 
       if (leafCount === 0 || pastSize > leafCount || pastSize === 0) {
         throw new Error(`Unable to get past size ${pastSize} for tree with ${leafCount} nodes`)
+      }
+
+      const cached = this.getPastRootCache(pastSize, tx)
+      if (cached) {
+        return Promise.resolve(cached)
       }
 
       const rootDepth = depthAtLeafCount(pastSize)
@@ -507,6 +561,7 @@ export class MerkleTree<
         currentHash = this.hasher.combineHash(depth, currentHash, currentHash)
       }
 
+      this.setPastRootCache(pastSize, currentHash, tx)
       return currentHash
     })
   }
@@ -520,21 +575,13 @@ export class MerkleTree<
   }
 
   /**
-   * Check if the tree contained the given element when it was the given size.
-   */
-  async contained(value: E, pastSize: number, tx?: IDatabaseTransaction): Promise<boolean> {
-    return this.db.withTransaction(tx, async (tx) => {
-      const elementIndex = await this.leavesIndex.get(this.hasher.merkleHash(value), tx)
-
-      return elementIndex !== undefined && elementIndex < pastSize
-    })
-  }
-
-  /**
    * Check if the tree currently contains the given element.
    */
   async contains(value: E, tx?: IDatabaseTransaction): Promise<boolean> {
-    return await this.contained(value, await this.size(tx), tx)
+    const currSize = await this.size(tx)
+    const elementIndex = await this.leavesIndex.get(this.hasher.merkleHash(value), tx)
+
+    return elementIndex !== undefined && elementIndex < currSize
   }
 
   /**
@@ -606,80 +653,162 @@ export class MerkleTree<
   }
 
   /**
-   * Recalculate all the hashes between the most recently added leaf in the group
-   * and the root hash.
-   *
-   * `transaction` is passed in so that a rollback happens for the entire change
-   * if a conflict occurs.
+   * Update hashes in the tree for leaves including and after startingLeafIndex.
    */
-  private async rehashRightPath(tx: IDatabaseTransaction) {
-    let depth = 0
-    const leafIndex = (await this.getCount('Leaves', tx)) - 1
-    const leaf = await this.getLeaf(leafIndex, tx)
-    let parentIndex = leaf.parentIndex as NodeIndex | undefined
-    const leafHash = leaf.merkleHash
-    let parentHash
+  private async hashTree(startingLeafIndex: number, tx: IDatabaseTransaction): Promise<void> {
+    const leavesCount = await this.getCount('Leaves', tx)
 
-    if (isRight(leafIndex)) {
-      const leftSiblingIndex = leafIndex - 1
-      const leftSibling = await this.getLeaf(leftSiblingIndex, tx)
-      const leftSiblingHash = leftSibling.merkleHash
-      parentHash = this.hasher.combineHash(depth, leftSiblingHash, leafHash)
-    } else {
-      parentHash = this.hasher.combineHash(depth, leafHash, leafHash)
+    if (leavesCount <= 1 || startingLeafIndex > leavesCount - 1) {
+      return
     }
 
-    while (!isEmpty(parentIndex)) {
-      const node = await this.getNode(parentIndex, tx)
-      depth += 1
+    const hashStack: {
+      hash: H // hash of a subtree
+      index: number // root node of the subtree
+      depth: number // depth of the root node
+      siblingIndex: number | null // index where the hash belongs
+    }[] = []
 
-      switch (node.side) {
-        case Side.Left: {
-          // Since we are walking the rightmost path, left nodes do not
-          // have right children. Therefore its sibling hash is set to its
-          // own hash and its parent hash is set to the combination of that hash
-          // with itself
-          await this.nodes.put(
-            parentIndex,
-            {
-              side: Side.Left,
-              hashOfSibling: parentHash,
-              parentIndex: node.parentIndex,
-            },
-            tx,
-          )
+    // Iterate over the leaves from right to left, hashing each leaf with its sibling (if it has one),
+    // then fetching the parent node:
+    // * If the node is a right node, push the current hash onto the stack.
+    // * If the node is a left node, pop a hash off the stack, update the hash of the node and its
+    //   siblings, push the hash of the node and sibling onto the stack, then move to the parent node.
+    for (
+      let leafIndex = leavesCount - 1;
+      leafIndex >= startingLeafIndex;
+      isRight(leafIndex) ? (leafIndex -= 2) : leafIndex--
+    ) {
+      // if leafIndex is even, we have a leaf without a sibling on the right of the tree
+      let leftLeaf, rightLeaf
+      if (isRight(leafIndex)) {
+        leftLeaf = await this.getLeaf(leafIndex - 1, tx)
+        rightLeaf = await this.getLeaf(leafIndex, tx)
+      } else {
+        rightLeaf = await this.getLeaf(leafIndex, tx)
+        leftLeaf = rightLeaf
+      }
 
-          parentIndex = node.parentIndex
-          parentHash = this.hasher.combineHash(depth, parentHash, parentHash)
-          break
+      let depth = 0
+      let hash = this.hasher.combineHash(depth, leftLeaf.merkleHash, rightLeaf.merkleHash)
+      let nodeIndex: number | undefined = leftLeaf.parentIndex
+      let node: NodeValue<H> = await this.getNode(nodeIndex, tx)
+
+      while (node.side === Side.Left && node.parentIndex !== 0) {
+        const element = hashStack.pop()
+        const stackHash = element?.hash ?? hash
+        // Should only be undefined if on the right side of the tree
+        // Ex: In a tree of 6 leaves, the two rightmost leaves will have
+        // a parent node with no sibling node
+        if (element === undefined) {
+          await this.updateHash(nodeIndex, node, hash, tx)
+        } else {
+          Assert.isNotNull(element.siblingIndex)
+          Assert.isEqual(nodeIndex, element.siblingIndex)
+
+          const leftNode = await this.getNode(element.siblingIndex, tx)
+          await this.updateHash(element.siblingIndex, leftNode, element.hash, tx)
+
+          const rightNode = await this.getNode(element.index, tx)
+          await this.updateHash(element.index, rightNode, hash, tx)
         }
 
-        case Side.Right: {
-          // since this is a new right node, we know that we have the correct
-          // hash because we set it correctly when we inserted it. But the left
-          // node needs to have its hashOfSibling set to our current hash.
-          if (node.leftIndex === undefined) {
-            throw new Error(`Expected node ${parentIndex} to have left node`)
-          }
+        depth++
 
-          const leftNode = await this.getNode(node.leftIndex, tx)
+        nodeIndex = node.parentIndex
+        Assert.isNotUndefined(nodeIndex)
+        node = await this.getNode(nodeIndex, tx)
+        hash = this.hasher.combineHash(depth, hash, stackHash)
+      }
 
-          await this.nodes.put(
-            node.leftIndex,
-            {
-              side: Side.Left,
-              parentIndex: leftNode.parentIndex,
-              hashOfSibling: parentHash,
-            },
-            tx,
-          )
-
-          parentIndex = leftNode.parentIndex
-          parentHash = this.hasher.combineHash(depth, node.hashOfSibling, parentHash)
-          break
-        }
+      // We're now either at a right node, or the root node of the entire tree.
+      if (node.parentIndex === 0) {
+        await this.updateHash(nodeIndex, node, hash, tx)
+      } else {
+        Assert.isNotUndefined(node.leftIndex)
+        hashStack.push({
+          hash,
+          depth,
+          index: nodeIndex,
+          siblingIndex: node.leftIndex,
+        })
       }
     }
+
+    // At this point, hashes have been set for complete subtrees of nodes above the leaves. Next, we need
+    // to update hashes for nodes that depend on the subtrees. If the root of a subtree is a right node, it
+    // will still be in hashStack, so we start at each of these nodes and continue up the tree.
+    while (hashStack.length > 0) {
+      // We'll hash upward from the smallest subtree. This will be the leftmost subtree, which will be the
+      // most recently pushed hash onto the stack.
+      const element = hashStack.pop()
+      Assert.isNotUndefined(element)
+
+      // If siblingIndex is null, we're at a left node. We'll look through hashStack to see if we've
+      // already encountered its sibling, which will happen if its sibling is a right-node root of a
+      // complete subtree.
+      if (element.siblingIndex === null) {
+        for (let i = 0; i < hashStack.length; i++) {
+          if (hashStack[i].siblingIndex === element.index) {
+            element.siblingIndex = hashStack[i].index
+          }
+        }
+      }
+
+      let siblingNode
+      const node = await this.getNode(element.index, tx)
+
+      // If we haven't encountered its sibling, the node will be a siblingless node -- either the root
+      // of the tree, or a node on the rightmost branch.
+      if (element.siblingIndex === null) {
+        await this.updateHash(element.index, node, element.hash, tx)
+      } else {
+        siblingNode = await this.getNode(element.siblingIndex, tx)
+        await this.updateHash(element.siblingIndex, siblingNode, element.hash, tx)
+      }
+
+      // Either the node or its sibling will be a left node, so we'll have the index of its parent.
+      const parentIndex: number | undefined = siblingNode?.parentIndex ?? node.parentIndex
+      Assert.isNotUndefined(parentIndex)
+
+      // If we've reached the root node, there may be other subtrees to process,
+      // so continue to the next hashStack element
+      if (parentIndex === 0) {
+        continue
+      }
+
+      // If we're not at a root node, hash the node with its sibling and push it back onto the stack.
+      const parentNode = await this.getNode(parentIndex, tx)
+
+      let newHash
+      if (element.siblingIndex === null) {
+        newHash = this.hasher.combineHash(element.depth + 1, element.hash, element.hash)
+      } else {
+        newHash =
+          node.side === 'Left'
+            ? this.hasher.combineHash(element.depth + 1, element.hash, node.hashOfSibling)
+            : this.hasher.combineHash(element.depth + 1, node.hashOfSibling, element.hash)
+      }
+
+      hashStack.push({
+        hash: newHash,
+        index: parentIndex,
+        siblingIndex: parentNode.leftIndex ?? null,
+        depth: element.depth + 1,
+      })
+    }
+  }
+
+  /**
+   * Updates hashOfSibling on a given node at a given index.
+   */
+  private updateHash(
+    index: number,
+    node: NodeValue<H>,
+    hash: H,
+    tx: IDatabaseTransaction,
+  ): Promise<void> {
+    return this.nodes.put(index, { ...node, hashOfSibling: hash }, tx)
   }
 }
 

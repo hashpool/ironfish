@@ -1,10 +1,10 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+import { DECRYPTED_NOTE_LENGTH, ENCRYPTED_NOTE_LENGTH } from '@ironfish/rust-nodejs'
 import bufio from 'bufio'
-import { ACCOUNT_KEY_LENGTH } from '../../account'
-import { NOTE_LENGTH } from '../../primitives/note'
-import { ENCRYPTED_NOTE_LENGTH, NoteEncrypted } from '../../primitives/noteEncrypted'
+import { NoteEncrypted } from '../../primitives/noteEncrypted'
+import { ACCOUNT_KEY_LENGTH } from '../../wallet'
 import { WorkerMessage, WorkerMessageType } from './workerMessage'
 import { WorkerTask } from './workerTask'
 
@@ -19,7 +19,7 @@ export interface DecryptNoteOptions {
 export interface DecryptedNote {
   index: number | null
   forSpender: boolean
-  merkleHash: Buffer
+  hash: Buffer
   nullifier: Buffer | null
   serializedNote: Buffer
 }
@@ -120,7 +120,7 @@ export class DecryptNotesResponse extends WorkerMessage {
         flags |= Number(!!note.nullifier) << 1
         flags |= Number(note.forSpender) << 2
         bw.writeU8(flags)
-        bw.writeHash(note.merkleHash)
+        bw.writeHash(note.hash)
         bw.writeBytes(note.serializedNote)
 
         if (note.index) {
@@ -152,8 +152,8 @@ export class DecryptNotesResponse extends WorkerMessage {
       const hasIndex = flags & (1 << 0)
       const hasNullifier = flags & (1 << 1)
       const forSpender = Boolean(flags & (1 << 2))
-      const merkleHash = reader.readHash()
-      const serializedNote = reader.readBytes(NOTE_LENGTH)
+      const hash = reader.readHash()
+      const serializedNote = reader.readBytes(DECRYPTED_NOTE_LENGTH)
 
       let index = null
       if (hasIndex) {
@@ -168,7 +168,7 @@ export class DecryptNotesResponse extends WorkerMessage {
       notes.push({
         forSpender,
         index,
-        merkleHash,
+        hash,
         nullifier,
         serializedNote,
       })
@@ -184,7 +184,7 @@ export class DecryptNotesResponse extends WorkerMessage {
       size += 1
 
       if (note) {
-        size += 1 + 32 + NOTE_LENGTH
+        size += 1 + 32 + DECRYPTED_NOTE_LENGTH
 
         if (note.index) {
           size += 4
@@ -228,7 +228,7 @@ export class DecryptNotesTask extends WorkerTask {
         decryptedNotes.push({
           index: currentNoteIndex,
           forSpender: false,
-          merkleHash: note.merkleHash(),
+          hash: note.merkleHash(),
           nullifier:
             currentNoteIndex !== null
               ? receivedNote.nullifier(spendingKey, BigInt(currentNoteIndex))
@@ -244,7 +244,7 @@ export class DecryptNotesTask extends WorkerTask {
         decryptedNotes.push({
           index: currentNoteIndex,
           forSpender: true,
-          merkleHash: note.merkleHash(),
+          hash: note.merkleHash(),
           nullifier: null,
           serializedNote: spentNote.serialize(),
         })

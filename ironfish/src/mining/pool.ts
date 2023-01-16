@@ -88,7 +88,7 @@ export class MiningPool {
 
     this.difficulty = BigInt(this.config.get('poolDifficulty'))
     const basePoolTarget = Target.fromDifficulty(this.difficulty).asBigInt()
-    this.target = BigIntUtils.toBytesBE(basePoolTarget, 32)
+    this.target = BigIntUtils.writeBigU256BE(basePoolTarget)
 
     this.connectTimeout = null
     this.connectWarned = false
@@ -261,7 +261,6 @@ export class MiningPool {
     try {
       headerBytes = mineableHeaderString(blockTemplate.header)
     } catch (error) {
-      this.stratum.submitReply(client.socket, false, "malformed-work")
       this.stratum.peers.punish(client, `${client.id} sent malformed work.`)
       return
     }
@@ -313,9 +312,7 @@ export class MiningPool {
 
     if (!connected) {
       if (!this.connectWarned) {
-        this.logger.warn(
-          `Failed to connect to node on ${String(this.rpc.connection.mode)}, retrying...`,
-        )
+        this.logger.warn(`Failed to connect to node on ${this.rpc.describe()}, retrying...`)
         this.connectWarned = true
       }
 
@@ -332,7 +329,7 @@ export class MiningPool {
     this.logger.info('Listening to node for new blocks')
 
     void this.processNewBlocks().catch(async (e: unknown) => {
-      this.logger.error('Fatal error occured while processing blocks from node:')
+      this.logger.error('Fatal error occurred while processing blocks from node:')
       this.logger.error(ErrorUtils.renderError(e, true))
       await this.stop()
     })
@@ -348,10 +345,15 @@ export class MiningPool {
   }
 
   private async processNewBlocks() {
-    for await (const payload of this.rpc.blockTemplateStream().contentStream(true)) {
+    const consensusParameters = (await this.rpc.getConsensusParameters()).content
+
+    for await (const payload of this.rpc.blockTemplateStream().contentStream()) {
       Assert.isNotUndefined(payload.previousBlockInfo)
       this.logger.info(`New block have got. height: ${payload.header.sequence}`)
-      this.restartCalculateTargetInterval()
+      this.restartCalculateTargetInterval(
+        consensusParameters.targetBlockTimeInSeconds,
+        consensusParameters.targetBucketTimeInSeconds,
+      )
 
       const currentHeadTarget = new Target(Buffer.from(payload.previousBlockInfo.target, 'hex'))
       this.currentHeadDifficulty = currentHeadTarget.toDifficulty()
@@ -361,28 +363,40 @@ export class MiningPool {
     }
   }
 
-  private recalculateTarget() {
+  private recalculateTarget(
+    targetBlockTimeInSeconds: number,
+    targetBucketTimeInSeconds: number,
+  ) {
     this.logger.debug('recalculating target')
 
     Assert.isNotNull(this.currentHeadTimestamp)
     Assert.isNotNull(this.currentHeadDifficulty)
 
-    const latestBlock = this.miningRequestBlocks.get(this.nextMiningRequestId - 1)
+    const currentBlock = this.miningRequestBlocks.get(this.nextMiningRequestId - 1)
+    Assert.isNotNull(currentBlock)
+    const latestBlock = Object.assign({}, currentBlock)
+    latestBlock.header = Object.assign({}, currentBlock.header)
+
     Assert.isNotNull(latestBlock)
 
     const newTime = new Date()
+
     const newTarget = Target.fromDifficulty(
       Target.calculateDifficulty(
         newTime,
         new Date(this.currentHeadTimestamp),
         this.currentHeadDifficulty,
+        targetBlockTimeInSeconds,
+        targetBucketTimeInSeconds,
       ),
     )
 
     // Target might be the same if there is a slight timing issue or if the block is at max target.
     // In this case, it is detrimental to send out new work as it will needlessly reset miner's search
     // space, resulting in duplicated work.
-    const existingTarget = BigIntUtils.fromBytes(Buffer.from(latestBlock.header.target, 'hex'))
+    const existingTarget = BigIntUtils.fromBytesBE(
+      Buffer.from(latestBlock.header.target, 'hex'),
+    )
     if (newTarget.asBigInt() === existingTarget && newTime.getTime() - latestBlock.header.timestamp < 30000) {
       this.logger.debug(
         `Existing target ${BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')}, no need to send out new work.`,
@@ -414,13 +428,16 @@ export class MiningPool {
     this.stratum.newWork(miningRequestId, newBlock)
   }
 
-  private restartCalculateTargetInterval() {
+  private restartCalculateTargetInterval(
+    targetBlockTimeInSeconds: number,
+    targetBucketTimeInSeconds: number,
+  ) {
     if (this.recalculateTargetInterval) {
       clearInterval(this.recalculateTargetInterval)
     }
 
     this.recalculateTargetInterval = setInterval(() => {
-      this.recalculateTarget()
+      this.recalculateTarget(targetBlockTimeInSeconds, targetBucketTimeInSeconds)
     }, RECALCULATE_TARGET_TIMEOUT)
   }
 

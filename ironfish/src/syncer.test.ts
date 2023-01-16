@@ -44,7 +44,7 @@ describe('Syncer', () => {
     // Peer should have more work than us now
     syncer.findPeer()
     expect(startSyncSpy).toHaveBeenCalledWith(peer)
-  }, 10000)
+  })
 
   it('should sync and then finish from peer', async () => {
     const { peerNetwork, syncer } = nodeTest
@@ -157,29 +157,29 @@ describe('Syncer', () => {
     const getBlocksSpy = jest
       .spyOn(peerNetwork, 'getBlocks')
       .mockImplementationOnce(() =>
-        Promise.resolve([
-          strategy.blockSerde.serialize(genesis),
-          strategy.blockSerde.serialize(blockA1),
-        ]),
+        Promise.resolve({
+          blocks: [genesis, blockA1],
+          time: 100,
+        }),
       )
       .mockImplementationOnce(() =>
-        Promise.resolve([
-          strategy.blockSerde.serialize(blockA1),
-          strategy.blockSerde.serialize(blockA2),
-        ]),
+        Promise.resolve({
+          blocks: [blockA1, blockA2],
+          time: 100,
+        }),
       )
       .mockImplementationOnce(() =>
-        Promise.resolve([
-          strategy.blockSerde.serialize(blockA2),
-          strategy.blockSerde.serialize(blockA3),
-        ]),
+        Promise.resolve({
+          blocks: [blockA2, blockA3],
+          time: 100,
+        }),
       )
-      .mockImplementationOnce(() => Promise.resolve([strategy.blockSerde.serialize(blockA3)]))
+      .mockImplementationOnce(() => Promise.resolve({ blocks: [blockA3], time: 100 }))
 
     syncer.loader = peer
     await syncer.syncBlocks(peer, genesis.header.hash, genesis.header.sequence)
 
-    expect(getBlocksSpy).toBeCalledTimes(4)
+    expect(getBlocksSpy).toHaveBeenCalledTimes(4)
     expect(getBlocksSpy).toHaveBeenNthCalledWith(1, peer, genesis.header.hash, 2)
     expect(getBlocksSpy).toHaveBeenNthCalledWith(2, peer, blockA1.header.hash, 2)
     expect(getBlocksSpy).toHaveBeenNthCalledWith(3, peer, blockA2.header.hash, 2)
@@ -201,15 +201,15 @@ describe('Syncer', () => {
 
     const getBlocksSpy = jest
       .spyOn(peerNetwork, 'getBlocks')
-      .mockImplementation(() => Promise.resolve([]))
+      .mockImplementation(() => Promise.resolve({ blocks: [], time: 100 }))
     const peerPunished = jest.spyOn(peer, 'punish')
 
     syncer.loader = peer
 
     await syncer.syncBlocks(peer, chain.genesis.hash, chain.genesis.sequence)
 
-    expect(getBlocksSpy).toBeCalledTimes(1)
-    expect(peerPunished).toBeCalledTimes(1)
-    expect(peerPunished).toBeCalledWith(BAN_SCORE.MAX, expect.anything())
+    expect(getBlocksSpy).toHaveBeenCalledTimes(1)
+    expect(peerPunished).toHaveBeenCalledTimes(1)
+    expect(peerPunished).toHaveBeenCalledWith(BAN_SCORE.MAX, expect.anything())
   })
 })

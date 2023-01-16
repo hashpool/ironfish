@@ -16,7 +16,7 @@ export default class Testnet extends IronfishCommand {
     [DataDirFlagKey]: DataDirFlag,
     confirm: Flags.boolean({
       default: false,
-      description: 'confirm without asking',
+      description: 'Confirm without asking',
     }),
     skipName: Flags.boolean({
       default: false,
@@ -37,7 +37,7 @@ export default class Testnet extends IronfishCommand {
       name: 'user',
       required: false,
       description:
-        'the user graffiti or url to a testnet user like https://testnet.ironfish.network/users/1080',
+        'The user graffiti or url to a testnet user like https://testnet.ironfish.network/users/1080',
     },
   ]
 
@@ -49,12 +49,12 @@ export default class Testnet extends IronfishCommand {
     let userArg = ((args.user as string | undefined) || '').trim()
 
     if (!userArg) {
-      userArg = (await CliUx.ux.prompt(
+      userArg = await CliUx.ux.prompt(
         'Enter the user graffiti or url to a testnet user like https://testnet.ironfish.network/users/1080\nUser Graffiti or URL',
         {
           required: true,
         },
-      )) as string
+      )
       this.log('')
     }
 

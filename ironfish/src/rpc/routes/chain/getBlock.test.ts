@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import '../../../testUtilities/matchers'
-import { GENESIS_BLOCK_SEQUENCE } from '../../../consensus'
+import { GENESIS_BLOCK_SEQUENCE } from '../../../primitives/block'
 import { BlockHashSerdeInstance } from '../../../serde'
 import { useMinerBlockFixture } from '../../../testUtilities/fixtures'
 import { createRouteTest } from '../../../testUtilities/routeTest'
@@ -16,7 +16,7 @@ describe('Route chain.getBlock', () => {
     await expect(routeTest.client.request('chain/getBlock', {}).waitForEnd()).rejects.toThrow(
       'Missing hash or sequence',
     )
-  }, 10000)
+  })
 
   it(`should fail if block can't be found with hash`, async () => {
     const hash = BlockHashSerdeInstance.serialize(Buffer.alloc(32, 'blockhashnotfound'))
@@ -24,13 +24,13 @@ describe('Route chain.getBlock', () => {
     await expect(
       routeTest.client.request('chain/getBlock', { hash }).waitForEnd(),
     ).rejects.toThrow('No block found')
-  }, 10000)
+  })
 
   it(`should fail if block can't be found with sequence`, async () => {
     await expect(
       routeTest.client.request('chain/getBlock', { index: 5 }).waitForEnd(),
     ).rejects.toThrow('No block found')
-  }, 10000)
+  })
 
   it('responds with a block', async () => {
     const chain = routeTest.node.chain
@@ -68,5 +68,5 @@ describe('Route chain.getBlock', () => {
     expect(response.content.blockIdentifier.hash).toEqual(
       block.header.hash.toString('hex').toUpperCase(),
     )
-  }, 10000)
+  })
 })

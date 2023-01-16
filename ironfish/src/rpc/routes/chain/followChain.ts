@@ -4,9 +4,10 @@
 import * as yup from 'yup'
 import { Assert } from '../../../assert'
 import { ChainProcessor } from '../../../chainProcessor'
+import { getBlockSize, getTransactionSize } from '../../../network/utils/serializers'
 import { Block, BlockHeader } from '../../../primitives'
 import { BlockHashSerdeInstance } from '../../../serde'
-import { GraffitiUtils, PromiseUtils } from '../../../utils'
+import { BufferUtils, PromiseUtils } from '../../../utils'
 import { ApiNamespace, router } from '../router'
 
 export type FollowChainStreamRequest =
@@ -115,15 +116,13 @@ router.register<typeof FollowChainStreamRequestSchema, FollowChainStreamResponse
       const transactions = block.transactions.map((transaction) => {
         return transaction.withReference(() => {
           return {
-            hash: BlockHashSerdeInstance.serialize(transaction.unsignedHash()),
-            size: Buffer.from(
-              JSON.stringify(node.strategy.transactionSerde.serialize(transaction)),
-            ).byteLength,
+            hash: BlockHashSerdeInstance.serialize(transaction.hash()),
+            size: getTransactionSize(transaction),
             fee: Number(transaction.fee()),
-            notes: [...transaction.notes()].map((note) => ({
+            notes: transaction.notes.map((note) => ({
               commitment: note.merkleHash().toString('hex'),
             })),
-            spends: [...transaction.spends()].map((spend) => ({
+            spends: transaction.spends.map((spend) => ({
               nullifier: spend.nullifier.toString('hex'),
             })),
           }
@@ -139,9 +138,8 @@ router.register<typeof FollowChainStreamRequestSchema, FollowChainStreamResponse
           hash: block.header.hash.toString('hex'),
           sequence: block.header.sequence,
           previous: block.header.previousBlockHash.toString('hex'),
-          graffiti: GraffitiUtils.toHuman(block.header.graffiti),
-          size: Buffer.from(JSON.stringify(node.strategy.blockSerde.serialize(block)))
-            .byteLength,
+          graffiti: BufferUtils.toHuman(block.header.graffiti),
+          size: getBlockSize(block),
           work: block.header.work.toString(),
           main: type === 'connected',
           timestamp: block.header.timestamp.valueOf(),

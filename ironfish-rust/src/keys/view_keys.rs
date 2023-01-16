@@ -12,18 +12,19 @@
 //! that you have spent.
 //!
 
-use super::{errors, PublicAddress};
-use crate::serializing::{
-    bytes_to_hex, hex_to_bytes, point_to_bytes, read_scalar, scalar_to_bytes,
+use super::PublicAddress;
+use crate::{
+    errors::IronfishError,
+    serializing::{bytes_to_hex, hex_to_bytes, read_scalar},
 };
 use bip39::{Language, Mnemonic};
 use blake2b_simd::Params as Blake2b;
+use group::GroupEncoding;
 use jubjub::SubgroupPoint;
-use rand::{thread_rng, Rng};
 
 use std::io;
 
-const DIFFIE_HELLMAN_PERSONALIZATION: &[u8; 16] = b"Beanstalk shared";
+const DIFFIE_HELLMAN_PERSONALIZATION: &[u8; 16] = b"Iron Fish shared";
 
 /// Key that allows someone to view a transaction that you have received.
 ///
@@ -35,18 +36,18 @@ pub struct IncomingViewKey {
 
 impl IncomingViewKey {
     /// load view key from a Read implementation
-    pub fn read<R: io::Read>(reader: &mut R) -> Result<Self, errors::SaplingKeyError> {
+    pub fn read<R: io::Read>(reader: &mut R) -> Result<Self, IronfishError> {
         let view_key = read_scalar(reader)?;
         Ok(IncomingViewKey { view_key })
     }
 
     /// Load a key from a string of hexadecimal digits
-    pub fn from_hex(value: &str) -> Result<Self, errors::SaplingKeyError> {
+    pub fn from_hex(value: &str) -> Result<Self, IronfishError> {
         match hex_to_bytes(value) {
-            Err(()) => Err(errors::SaplingKeyError::InvalidViewingKey),
+            Err(_) => Err(IronfishError::InvalidViewingKey),
             Ok(bytes) => {
                 if bytes.len() != 32 {
-                    Err(errors::SaplingKeyError::InvalidViewingKey)
+                    Err(IronfishError::InvalidViewingKey)
                 } else {
                     Self::read(&mut bytes[..].as_ref())
                 }
@@ -55,13 +56,11 @@ impl IncomingViewKey {
     }
 
     /// Load a key from a string of words to be decoded into bytes.
-    ///
-    /// See https://github.com/BeanstalkNetwork/word-encoding
-    pub fn from_words(language_code: &str, value: String) -> Result<Self, errors::SaplingKeyError> {
+    pub fn from_words(language_code: &str, value: String) -> Result<Self, IronfishError> {
         let language = Language::from_language_code(language_code)
-            .ok_or(errors::SaplingKeyError::InvalidLanguageEncoding)?;
+            .ok_or(IronfishError::InvalidLanguageEncoding)?;
         let mnemonic = Mnemonic::from_phrase(&value, language)
-            .map_err(|_| errors::SaplingKeyError::InvalidPaymentAddress)?;
+            .map_err(|_| IronfishError::InvalidPaymentAddress)?;
         let bytes = mnemonic.entropy();
         let mut byte_arr = [0; 32];
         byte_arr.clone_from_slice(&bytes[0..32]);
@@ -70,48 +69,20 @@ impl IncomingViewKey {
 
     /// Viewing key as hexadecimal, for readability.
     pub fn hex_key(&self) -> String {
-        bytes_to_hex(&scalar_to_bytes(&self.view_key))
+        bytes_to_hex(&self.view_key.to_bytes())
     }
 
     /// Even more readable
-    pub fn words_key(&self, language_code: &str) -> Result<String, errors::SaplingKeyError> {
+    pub fn words_key(&self, language_code: &str) -> Result<String, IronfishError> {
         let language = Language::from_language_code(language_code)
-            .ok_or(errors::SaplingKeyError::InvalidLanguageEncoding)?;
-        let mnemonic = Mnemonic::from_entropy(&scalar_to_bytes(&self.view_key), language).unwrap();
+            .ok_or(IronfishError::InvalidLanguageEncoding)?;
+        let mnemonic = Mnemonic::from_entropy(&self.view_key.to_bytes(), language).unwrap();
         Ok(mnemonic.phrase().to_string())
     }
 
-    /// Generate a public address from the incoming viewing key, given a specific
-    /// 11 byte diversifier.
-    ///
-    /// This may fail, as not all diversifiers are created equal.
-    ///
-    /// Note: This may need to be public at some point. I'm hoping the client
-    /// API would never have to deal with diversifiers, but I'm not sure, yet.
-    pub fn public_address(
-        &self,
-        diversifier: &[u8; 11],
-    ) -> Result<PublicAddress, errors::SaplingKeyError> {
-        PublicAddress::from_view_key(self, diversifier)
-    }
-
-    /// Generate a public address from this key,
-    /// picking a diversifier that is guaranteed to work with it.
-    ///
-    /// This method always succeeds, retrying with a different diversifier if
-    /// one doesn't work.
-    pub fn generate_public_address(&self) -> PublicAddress {
-        let public_address;
-        loop {
-            let mut diversifier_candidate = [0u8; 11];
-            thread_rng().fill(&mut diversifier_candidate);
-
-            if let Ok(key) = self.public_address(&diversifier_candidate) {
-                public_address = key;
-                break;
-            }
-        }
-        public_address
+    /// Generate a public address from the incoming viewing key
+    pub fn public_address(&self) -> PublicAddress {
+        PublicAddress::from_view_key(self)
     }
 
     /// Calculate the shared secret key given the ephemeral public key that was
@@ -131,12 +102,12 @@ pub struct OutgoingViewKey {
 
 impl OutgoingViewKey {
     /// Load a key from a string of hexadecimal digits
-    pub fn from_hex(value: &str) -> Result<Self, errors::SaplingKeyError> {
+    pub fn from_hex(value: &str) -> Result<Self, IronfishError> {
         match hex_to_bytes(value) {
-            Err(()) => Err(errors::SaplingKeyError::InvalidViewingKey),
+            Err(_) => Err(IronfishError::InvalidViewingKey),
             Ok(bytes) => {
                 if bytes.len() != 32 {
-                    Err(errors::SaplingKeyError::InvalidViewingKey)
+                    Err(IronfishError::InvalidViewingKey)
                 } else {
                     let mut view_key = [0; 32];
                     view_key.clone_from_slice(&bytes[0..32]);
@@ -147,13 +118,11 @@ impl OutgoingViewKey {
     }
 
     /// Load a key from a string of words to be decoded into bytes.
-    ///
-    /// See https://github.com/BeanstalkNetwork/word-encoding
-    pub fn from_words(language_code: &str, value: String) -> Result<Self, errors::SaplingKeyError> {
+    pub fn from_words(language_code: &str, value: String) -> Result<Self, IronfishError> {
         let language = Language::from_language_code(language_code)
-            .ok_or(errors::SaplingKeyError::InvalidLanguageEncoding)?;
+            .ok_or(IronfishError::InvalidLanguageEncoding)?;
         let mnemonic = Mnemonic::from_phrase(&value, language)
-            .map_err(|_| errors::SaplingKeyError::InvalidPaymentAddress)?;
+            .map_err(|_| IronfishError::InvalidPaymentAddress)?;
         let bytes = mnemonic.entropy();
         let mut view_key = [0; 32];
         view_key.clone_from_slice(&bytes[0..32]);
@@ -166,16 +135,16 @@ impl OutgoingViewKey {
     }
 
     /// Even more readable
-    pub fn words_key(&self, language_code: &str) -> Result<String, errors::SaplingKeyError> {
+    pub fn words_key(&self, language_code: &str) -> Result<String, IronfishError> {
         let language = Language::from_language_code(language_code)
-            .ok_or(errors::SaplingKeyError::InvalidLanguageEncoding)?;
+            .ok_or(IronfishError::InvalidLanguageEncoding)?;
         let mnemonic = Mnemonic::from_entropy(&self.view_key, language).unwrap();
         Ok(mnemonic.phrase().to_string())
     }
 }
 
 /// Pair of outgoing and incoming view keys for a complete audit
-/// of spends and receipts
+/// of spends and outputs
 #[derive(Clone)]
 pub struct ViewKeys {
     pub incoming: IncomingViewKey,
@@ -185,28 +154,25 @@ pub struct ViewKeys {
 /// Derive a shared secret key from a secret key and the other person's public
 /// key.
 ///
-///
 /// The shared secret point is calculated by multiplying the public and private
 /// keys. This gets converted to bytes and hashed together with the reference
 /// public key to generate the final shared secret as used in encryption.
 
 /// A Diffie Hellman key exchange might look like this:
-///  *  alice generates her DH secret key as SaplingKeys::internal_viewing_key
-///  *  alice chooses a diversifier and publishes it and the transmission key
-///     generated from it as a PublicAddress
-///      *  The transmission key becomes her DH public_key
-///  *  Bob chooses some randomness as his secret key using the
-///     generate_diffie_hellman_keys method on alice's PublicAddress
-///  *  That method calculates bob's public key as (alice diversifier * bob secret key)
+///  *  Alice generates her DH secret key as SaplingKeys::internal_viewing_key
+///  *  Alice publishes her Public key
+///      *  This becomes her DH public_key
+///  *  Bob chooses some randomness as his secret key
+///  *  Bob's public key is calculated as (PUBLIC_KEY_GENERATOR * Bob secret key)
 ///      *  This public key becomes the reference public key for both sides
-///      *  bob sends public key to Alice
-///  *  bob calculates shared secret key as (alice public key * bob secret key)
-///      *  which is (alice transmission key * bob secret key)
-///      *  maths to (alice internal viewing key * diversifier * bob secret key)
-///  *  alice calculates shared secret key as (bob public key * alice internal viewing key)
-///      *  this maths to (alice diversifier * bob secret key * alice internal viewing key)
-///  *  both alice and bob hash the shared secret key with the reference public
-///     key (bob's public key) to get the final shared secret
+///      *  Bob sends public key to Alice
+///  *  Bob calculates shared secret key as (Alice public key * Bob secret key)
+///      *  which is (Alice public key * Bob secret key)
+///      *  which is equivalent to (Alice internal viewing key * PUBLIC_KEY_GENERATOR * Bob secret key)
+///  *  Alice calculates shared secret key as (Bob public key * Alice internal viewing key)
+///      *  which is equivalent to (Alice internal viewing key * PUBLIC_KEY_GENERATOR * Bob secret key)
+///  *  both Alice and Bob hash the shared secret key with the reference public
+///     key (Bob's public key) to get the final shared secret
 ///
 /// The resulting key can be used in any symmetric cipher
 pub(crate) fn shared_secret(
@@ -214,10 +180,8 @@ pub(crate) fn shared_secret(
     other_public_key: &SubgroupPoint,
     reference_public_key: &SubgroupPoint,
 ) -> [u8; 32] {
-    let shared_secret = point_to_bytes(&(other_public_key * secret_key))
-        .expect("should be able to convert point to bytes");
-    let reference_bytes =
-        point_to_bytes(reference_public_key).expect("should be able to convert point to bytes");
+    let shared_secret = (other_public_key * secret_key).to_bytes();
+    let reference_bytes = reference_public_key.to_bytes();
 
     let mut hasher = Blake2b::new()
         .hash_length(32)

@@ -2,9 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 import type { LevelupDatabase } from './database'
+import { BufferSet } from 'buffer-map'
+import FastPriorityQueue from 'fastpriorityqueue'
 import MurmurHash3 from 'imurmurhash'
+import { Assert } from '../../assert'
 import { AsyncUtils } from '../../utils/async'
 import {
+  DatabaseIteratorOptions,
+  DatabaseKeyRange,
   DatabaseSchema,
   DatabaseStore,
   DuplicateKeyError,
@@ -13,29 +18,16 @@ import {
   SchemaKey,
   SchemaValue,
 } from '../database'
-import { BUFFER_TO_STRING_ENCODING } from '../database/encoding'
+import { BufferToStringEncoding } from '../database/encoding'
+import { StorageUtils } from '../database/utils'
 import { LevelupTransaction } from './transaction'
 
 const ENABLE_TRANSACTIONS = true
 
-interface INotFoundError {
-  type: 'NotFoundError'
-}
-
-function isNotFoundError(error: unknown): error is INotFoundError {
-  return (error as INotFoundError)?.type === 'NotFoundError'
-}
-
 export class LevelupStore<Schema extends DatabaseSchema> extends DatabaseStore<Schema> {
   db: LevelupDatabase
 
-  /* In non relational KV stores, to emulate 'startswith' you often need
-   to use greaterThan and lessThan using the prefix + a glyph marker. To
-   search for "App" in a table containing "Apple", "Application", and "Boat"
-   you would query "gte('App') && lte('App' + 'ff')" Which would return
-   'Apple' and 'Application'
-   */
-  allKeysRange: { gte: Buffer; lt: Buffer }
+  allKeysRange: DatabaseKeyRange
   prefixBuffer: Buffer
 
   constructor(db: LevelupDatabase, options: IDatabaseStoreOptions<Schema>) {
@@ -44,23 +36,21 @@ export class LevelupStore<Schema extends DatabaseSchema> extends DatabaseStore<S
 
     // Hash the prefix key to ensure identical length and avoid collisions
     const prefixHash = new MurmurHash3(this.name, 1).result()
+
     this.prefixBuffer = Buffer.alloc(4)
     this.prefixBuffer.writeUInt32BE(prefixHash)
 
-    const gte = Buffer.alloc(4)
-    gte.writeUInt32BE(prefixHash)
-
-    const lt = Buffer.alloc(4)
-    lt.writeUInt32BE(prefixHash + 1)
-
-    this.allKeysRange = {
-      gte: gte,
-      lt: lt,
-    }
+    this.allKeysRange = StorageUtils.getPrefixKeyRange(this.prefixBuffer)
   }
 
   async has(key: SchemaKey<Schema>, transaction?: IDatabaseTransaction): Promise<boolean> {
-    return (await this.get(key, transaction)) !== undefined
+    const [encodedKey] = this.encode(key)
+
+    if (ENABLE_TRANSACTIONS && transaction instanceof LevelupTransaction) {
+      return transaction.has(this, key)
+    }
+
+    return (await this.db.get(encodedKey)) !== undefined
   }
 
   async get(
@@ -73,87 +63,150 @@ export class LevelupStore<Schema extends DatabaseSchema> extends DatabaseStore<S
       return transaction.get(this, key)
     }
 
-    try {
-      const data = (await this.db.levelup.get(encodedKey)) as unknown
-      if (data === undefined) {
-        return undefined
-      }
-      if (!(data instanceof Buffer)) {
-        return undefined
-      }
-      return this.valueEncoding.deserialize(data)
-    } catch (error: unknown) {
-      if (isNotFoundError(error)) {
-        return undefined
-      }
-      throw error
+    const data = await this.db.get(encodedKey)
+
+    if (data === undefined) {
+      return undefined
     }
+
+    return this.valueEncoding.deserialize(data)
   }
 
+  /* Get an [[`AsyncGenerator`]] that yields all of the key/value pairs in the IDatastore */
   async *getAllIter(
     transaction?: IDatabaseTransaction,
+    keyRange?: DatabaseKeyRange,
+    iteratorOptions?: DatabaseIteratorOptions,
   ): AsyncGenerator<[SchemaKey<Schema>, SchemaValue<Schema>]> {
-    const seen = new Set<string>()
+    if (keyRange) {
+      keyRange = StorageUtils.addPrefixToRange(keyRange, this.prefixBuffer)
+    } else {
+      keyRange = this.allKeysRange
+    }
 
-    if (ENABLE_TRANSACTIONS && transaction instanceof LevelupTransaction) {
+    const seen = new BufferSet()
+    const cacheElements = new FastPriorityQueue<{ key: Buffer; value: SchemaValue<Schema> }>(
+      ({ key: a }, { key: b }) =>
+        iteratorOptions?.reverse ? b.compare(a) < 0 : a.compare(b) < 0,
+    )
+
+    if (ENABLE_TRANSACTIONS && transaction) {
+      Assert.isInstanceOf(transaction, LevelupTransaction)
       await transaction.acquireLock()
 
-      for (const [key, value] of transaction.cache.entries()) {
-        const keyBuffer = BUFFER_TO_STRING_ENCODING.deserialize(key)
+      for (const [keyString, value] of transaction.cache.entries()) {
+        const key = BufferToStringEncoding.deserialize(keyString)
 
-        const isFromStore = keyBuffer
-          .slice(0, this.prefixBuffer.byteLength)
-          .equals(this.prefixBuffer)
+        if (!StorageUtils.hasPrefix(key, this.prefixBuffer)) {
+          continue
+        }
 
-        if (isFromStore) {
-          if (value !== undefined) {
-            yield [this.decodeKey(keyBuffer), value as SchemaValue<Schema>]
-          }
-          seen.add(key)
+        if (!StorageUtils.isInRange(key, keyRange)) {
+          continue
+        }
+
+        seen.add(key)
+
+        if (value === undefined) {
+          continue
+        }
+
+        if (iteratorOptions?.ordered) {
+          cacheElements.add({ key: key, value: value as SchemaValue<Schema> })
+        } else {
+          yield [this.decodeKey(key), value as SchemaValue<Schema>]
         }
       }
     }
 
-    const stream = this.db.levelup.createReadStream(this.allKeysRange)
+    let nextCacheElement = cacheElements.peek()
 
-    for await (const pair of stream) {
-      const { key, value } = pair as unknown as { key: Buffer; value: Buffer }
-      if (!seen.has(BUFFER_TO_STRING_ENCODING.serialize(key))) {
+    for await (const [key, value] of this.db.getAllIter(keyRange, iteratorOptions)) {
+      while (
+        nextCacheElement &&
+        (iteratorOptions?.reverse
+          ? key.compare(nextCacheElement.key) <= 0
+          : key.compare(nextCacheElement.key) >= 0)
+      ) {
+        const element = cacheElements.poll()
+        Assert.isNotUndefined(element)
+        yield [this.decodeKey(element.key), element.value]
+        nextCacheElement = cacheElements.peek()
+      }
+
+      if (seen.has(key)) {
+        continue
+      } else {
         yield [this.decodeKey(key), this.valueEncoding.deserialize(value)]
       }
+    }
+
+    while (!cacheElements.isEmpty()) {
+      const element = cacheElements.poll()
+      Assert.isNotUndefined(element)
+      yield [this.decodeKey(element.key), element.value]
     }
   }
 
   async getAll(
     transaction?: IDatabaseTransaction,
+    keyRange?: DatabaseKeyRange,
+    iteratorOptions?: DatabaseIteratorOptions,
   ): Promise<Array<[SchemaKey<Schema>, SchemaValue<Schema>]>> {
-    return AsyncUtils.materialize(this.getAllIter(transaction))
+    return AsyncUtils.materialize(this.getAllIter(transaction, keyRange, iteratorOptions))
   }
 
   async *getAllValuesIter(
     transaction?: IDatabaseTransaction,
+    keyRange?: DatabaseKeyRange,
+    iteratorOptions?: DatabaseIteratorOptions,
   ): AsyncGenerator<SchemaValue<Schema>> {
-    for await (const [, value] of this.getAllIter(transaction)) {
+    for await (const [, value] of this.getAllIter(transaction, keyRange, iteratorOptions)) {
       yield value
     }
   }
 
-  async getAllValues(transaction?: IDatabaseTransaction): Promise<Array<SchemaValue<Schema>>> {
-    return AsyncUtils.materialize(this.getAllValuesIter(transaction))
+  async getAllValues(
+    transaction?: IDatabaseTransaction,
+    keyRange?: DatabaseKeyRange,
+    iteratorOptions?: DatabaseIteratorOptions,
+  ): Promise<Array<SchemaValue<Schema>>> {
+    return AsyncUtils.materialize(this.getAllValuesIter(transaction, keyRange, iteratorOptions))
   }
 
-  async *getAllKeysIter(transaction?: IDatabaseTransaction): AsyncGenerator<SchemaKey<Schema>> {
-    for await (const [key] of this.getAllIter(transaction)) {
+  async *getAllKeysIter(
+    transaction?: IDatabaseTransaction,
+    keyRange?: DatabaseKeyRange,
+    iteratorOptions?: DatabaseIteratorOptions,
+  ): AsyncGenerator<SchemaKey<Schema>> {
+    for await (const [key] of this.getAllIter(transaction, keyRange, iteratorOptions)) {
       yield key
     }
   }
 
-  async getAllKeys(transaction?: IDatabaseTransaction): Promise<Array<SchemaKey<Schema>>> {
-    return AsyncUtils.materialize(this.getAllKeysIter(transaction))
+  async getAllKeys(
+    transaction?: IDatabaseTransaction,
+    keyRange?: DatabaseKeyRange,
+    iteratorOptions?: DatabaseIteratorOptions,
+  ): Promise<Array<SchemaKey<Schema>>> {
+    return AsyncUtils.materialize(this.getAllKeysIter(transaction, keyRange, iteratorOptions))
   }
 
-  async clear(): Promise<void> {
-    await this.db.levelup.clear(this.allKeysRange)
+  async clear(transaction?: IDatabaseTransaction, keyRange?: DatabaseKeyRange): Promise<void> {
+    if (transaction) {
+      for await (const key of this.getAllKeysIter(transaction, keyRange)) {
+        await this.del(key, transaction)
+      }
+      return
+    }
+
+    if (keyRange) {
+      keyRange = StorageUtils.addPrefixToRange(keyRange, this.prefixBuffer)
+    } else {
+      keyRange = this.allKeysRange
+    }
+
+    await this.db.levelup.clear(keyRange ?? this.allKeysRange)
   }
 
   async put(
@@ -163,6 +216,7 @@ export class LevelupStore<Schema extends DatabaseSchema> extends DatabaseStore<S
   ): Promise<void>
   async put(a: unknown, b: unknown, c?: unknown): Promise<void> {
     const { key, value, transaction } = parsePut<Schema>(a, b, c)
+
     if (key === undefined) {
       throw new Error('No key defined')
     }
@@ -172,7 +226,7 @@ export class LevelupStore<Schema extends DatabaseSchema> extends DatabaseStore<S
     }
 
     const [encodedKey, encodedValue] = this.encode(key, value)
-    await this.db.levelup.put(encodedKey, encodedValue)
+    await this.db.put(encodedKey, encodedValue)
   }
 
   async add(
@@ -195,7 +249,7 @@ export class LevelupStore<Schema extends DatabaseSchema> extends DatabaseStore<S
     }
 
     const [encodedKey, encodedValue] = this.encode(key, value)
-    await this.db.levelup.put(encodedKey, encodedValue)
+    await this.db.put(encodedKey, encodedValue)
   }
 
   async del(key: SchemaKey<Schema>, transaction?: IDatabaseTransaction): Promise<void> {
