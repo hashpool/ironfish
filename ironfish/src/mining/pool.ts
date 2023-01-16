@@ -4,7 +4,7 @@
 import { blake3 } from '@napi-rs/blake-hash'
 import LeastRecentlyUsed from 'blru'
 import { Assert } from '../assert'
-import { GRAFFITI_SIZE } from '../consensus/consensus'
+import { GRAFFITI_SIZE } from '../primitives/block'
 import { Config } from '../fileStores/config'
 import { Logger } from '../logger'
 import { Target } from '../primitives/target'
@@ -399,18 +399,18 @@ export class MiningPool {
     )
     if (newTarget.asBigInt() === existingTarget && newTime.getTime() - latestBlock.header.timestamp < 30000) {
       this.logger.debug(
-        `Existing target ${BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')}, no need to send out new work.`,
+        `Existing target ${BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')}, no need to send out new work.`,
       )
       return
     }
 
     this.logger.debug(
-      `New target ${BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')} need to send out new work.`,
+      `New target ${BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')} need to send out new work.`,
     )
 
     const blockTemplate = Object.assign({}, latestBlock)
     blockTemplate.header = Object.assign({}, latestBlock.header)
-    blockTemplate.header.target = BigIntUtils.toBytesBE(newTarget.asBigInt(), 32).toString('hex')
+    blockTemplate.header.target = BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')
     blockTemplate.header.timestamp = newTime.getTime()
     this.distributeNewBlock(blockTemplate)
 
