@@ -1,19 +1,21 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+import { Asset } from '@ironfish/rust-nodejs'
 import { CurrencyUtils, isValidPublicAddress } from '@ironfish/sdk'
 import { CliUx, Flags } from '@oclif/core'
 import { IronfishCommand } from '../../command'
 import { RemoteFlags } from '../../flags'
 import { ProgressBar } from '../../types'
+import { selectAsset } from '../../utils/asset'
 
 export class Send extends IronfishCommand {
   static description = `Send coins to another account`
 
   static examples = [
-    '$ ironfish wallet:send -a 2 -o 0.00000001 -t 997c586852d1b12da499bcff53595ba37d04e4909dbdb1a75f3bfd90dd7212217a1c2c0da652d187fc52ed',
-    '$ ironfish wallet:send -a 2 -o 0.00000001 -t 997c586852d1b12da499bcff53595ba37d04e4909dbdb1a75f3bfd90dd7212217a1c2c0da652d187fc52ed -f otheraccount',
-    '$ ironfish wallet:send -a 2 -o 0.00000001 -t 997c586852d1b12da499bcff53595ba37d04e4909dbdb1a75f3bfd90dd7212217a1c2c0da652d187fc52ed -f otheraccount -m my_message_for_the_transaction',
+    '$ ironfish wallet:send --amount 2 --fee 0.00000001 --to 997c586852d1b12da499bcff53595ba37d04e4909dbdb1a75f3bfd90dd7212217a1c2c0da652d187fc52ed',
+    '$ ironfish wallet:send --amount 2 --fee 0.00000001 --to 997c586852d1b12da499bcff53595ba37d04e4909dbdb1a75f3bfd90dd7212217a1c2c0da652d187fc52ed --account otheraccount',
+    '$ ironfish wallet:send --amount 2 --fee 0.00000001 --to 997c586852d1b12da499bcff53595ba37d04e4909dbdb1a75f3bfd90dd7212217a1c2c0da652d187fc52ed --account otheraccount --memo "enjoy!"',
   ]
 
   static flags = {
@@ -63,6 +65,7 @@ export class Send extends IronfishCommand {
     const { flags } = await this.parse(Send)
     let amount = null
     let fee = null
+    let assetId = flags.assetId
     let to = flags.to?.trim()
     let from = flags.account?.trim()
     const expiration = flags.expiration
@@ -78,11 +81,21 @@ export class Send extends IronfishCommand {
       this.exit(1)
     }
 
+    if (assetId == null) {
+      assetId = await selectAsset(client, from, {
+        action: 'send',
+        showNativeAsset: true,
+        showSingleAssetChoice: false,
+      })
+    }
+
+    if (!assetId) {
+      assetId = Asset.nativeId().toString('hex')
+    }
+
     if (flags.amount) {
       amount = CurrencyUtils.decodeIron(flags.amount)
     }
-
-    const assetId = flags.assetId
 
     if (amount === null) {
       const response = await client.getAccountBalance({ account: from, assetId })
