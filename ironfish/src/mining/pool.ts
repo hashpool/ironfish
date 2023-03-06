@@ -447,7 +447,7 @@ export class MiningPool {
     const existingTarget = BigIntUtils.fromBytesBE(
       Buffer.from(latestBlock.header.target, 'hex'),
     )
-    if (newTarget.asBigInt() === existingTarget && newTime.getTime() - latestBlock.header.timestamp < 30000) {
+    if (newTarget.asBigInt() === existingTarget && newTime.getTime() - latestBlock.header.timestamp < 14300) {
       this.logger.debug(
         `Existing target ${BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')}, no need to send out new work.`,
       )
@@ -458,11 +458,13 @@ export class MiningPool {
       `New target ${BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')} need to send out new work.`,
     )
 
-    const blockTemplate = Object.assign({}, latestBlock)
-    blockTemplate.header = Object.assign({}, latestBlock.header)
-    blockTemplate.header.target = BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')
-    blockTemplate.header.timestamp = newTime.getTime()
-    this.distributeNewBlock(blockTemplate)
+    // const blockTemplate = Object.assign({}, latestBlock)
+    // blockTemplate.header = Object.assign({}, latestBlock.header)
+    // blockTemplate.header.target = BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')
+    // blockTemplate.header.timestamp = newTime.getTime()
+    latestBlock.header.target = BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')
+    latestBlock.header.timestamp = newTime.getTime()
+    this.distributeNewBlock(latestBlock)
 
     // this.logger.debug('target recalculated', { prevHash: latestBlock.header.previousBlockHash })
   }
