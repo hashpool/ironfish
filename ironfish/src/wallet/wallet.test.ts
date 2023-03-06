@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 import { Asset, generateKey } from '@ironfish/rust-nodejs'
 import { BufferMap } from 'buffer-map'
+import { v4 as uuid } from 'uuid'
 import { Assert } from '../assert'
 import { VerificationResultReason } from '../consensus'
 import {
@@ -18,7 +19,8 @@ import {
   useTxFixture,
 } from '../testUtilities'
 import { AsyncUtils } from '../utils'
-import { TransactionStatus } from '../wallet'
+import { TransactionStatus, TransactionType } from '../wallet'
+import { AssetStatus } from './wallet'
 
 describe('Accounts', () => {
   const nodeTest = createNodeTest()
@@ -242,8 +244,8 @@ describe('Accounts', () => {
     const forkSpendNullifier = forkSpendTx.spends[0].nullifier
     const forkSpendNoteHash = await accountA.getNoteHash(forkSpendNullifier)
 
-    // nullifier should be non-null
-    Assert.isNotNull(forkSpendNoteHash)
+    // nullifier should be defined
+    Assert.isNotUndefined(forkSpendNoteHash)
 
     // re-org
     await expect(nodeA.chain).toAddBlock(blockB1)
@@ -257,7 +259,7 @@ describe('Accounts', () => {
     expect(forkSpendNote?.nullifier).toBeNull()
 
     // nullifier should have been removed from nullifierToNote
-    expect(await accountA.getNoteHash(forkSpendNullifier)).toBeNull()
+    expect(await accountA.getNoteHash(forkSpendNullifier)).toBeUndefined()
   })
 
   describe('scanTransactions', () => {
@@ -411,7 +413,7 @@ describe('Accounts', () => {
         unconfirmed: BigInt(10),
         unconfirmedCount: 0,
       })
-    }, 100000)
+    })
   })
 
   describe('getBalance', () => {
@@ -539,6 +541,45 @@ describe('Accounts', () => {
 
       await expect(node.wallet.importAccount(clone)).rejects.toThrow(
         'Account already exists with provided spending key',
+      )
+    })
+
+    it('should be able to import an account from solely its view keys', async () => {
+      const { node } = nodeTest
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { spendingKey, ...key } = generateKey()
+      const accountValue = {
+        id: uuid(),
+        name: 'viewonly',
+        version: 1,
+        spendingKey: null,
+        ...key,
+      }
+      const viewonlyAccount = await node.wallet.importAccount(accountValue)
+      expect(viewonlyAccount.name).toEqual(accountValue.name)
+      expect(viewonlyAccount.viewKey).toEqual(key.viewKey)
+      expect(viewonlyAccount.incomingViewKey).toEqual(key.incomingViewKey)
+      expect(viewonlyAccount.outgoingViewKey).toEqual(key.outgoingViewKey)
+      expect(viewonlyAccount.spendingKey).toBeNull()
+      expect(viewonlyAccount.publicAddress).toEqual(key.publicAddress)
+    })
+    it('should be unable to import a viewonly account if it is a dupe', async () => {
+      const { node } = nodeTest
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { spendingKey, ...key } = generateKey()
+      const accountValue = {
+        id: uuid(),
+        name: 'viewonly',
+        version: 1,
+        spendingKey: null,
+        ...key,
+      }
+      await node.wallet.importAccount(accountValue)
+      const clone = { ...accountValue }
+      clone.name = 'Different name'
+
+      await expect(node.wallet.importAccount(clone)).rejects.toThrow(
+        'Account already exists with provided view key(s)',
       )
     })
   })
@@ -697,11 +738,11 @@ describe('Accounts', () => {
         id: account.id,
       })
 
-      await node.wallet.removeAccount(account.name)
+      await node.wallet.removeAccountByName(account.name)
 
       expect(node.wallet.getAccountByName(account.name)).toBeNull()
 
-      // It should not be cleand yet
+      // It should not be cleaned yet
       await expect(
         node.wallet.walletDb.loadTransaction(account, tx.hash()),
       ).resolves.not.toBeUndefined()
@@ -712,6 +753,80 @@ describe('Accounts', () => {
       await expect(
         node.wallet.walletDb.loadTransaction(account, tx.hash()),
       ).resolves.toBeUndefined()
+    })
+  })
+
+  describe('createTransaction', () => {
+    it('should throw error if fee and fee rate are empty', async () => {
+      const { node } = nodeTest
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+
+      await node.wallet.updateHead()
+
+      const transaction = blockA1.minersFee
+
+      const transactionValue = await accountA.getTransaction(transaction.hash())
+      Assert.isNotUndefined(transactionValue)
+      Assert.isNotNull(transactionValue.sequence)
+
+      const rawTransaction = node.wallet.createTransaction({
+        account: accountA,
+        outputs: [
+          {
+            publicAddress: '0d804ea639b2547d1cd612682bf99f7cad7aad6d59fd5457f61272defcd4bf5b',
+            amount: 10n,
+            memo: '',
+            assetId: Asset.nativeId(),
+          },
+        ],
+        expiration: 0,
+      })
+
+      await expect(rawTransaction).rejects.toThrow(
+        'Fee or FeeRate is required to create a transaction',
+      )
+    })
+
+    it('should create raw transaction with fee rate', async () => {
+      const { node } = nodeTest
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+
+      await node.wallet.updateHead()
+
+      const transaction = blockA1.minersFee
+
+      const transactionValue = await accountA.getTransaction(transaction.hash())
+      Assert.isNotUndefined(transactionValue)
+      Assert.isNotNull(transactionValue.sequence)
+
+      const rawTransaction = await node.wallet.createTransaction({
+        account: accountA,
+        outputs: [
+          {
+            publicAddress: '0d804ea639b2547d1cd612682bf99f7cad7aad6d59fd5457f61272defcd4bf5b',
+            amount: 10n,
+            memo: '',
+            assetId: Asset.nativeId(),
+          },
+        ],
+        expiration: 0,
+        feeRate: 200n,
+      })
+
+      expect(rawTransaction.outputs.length).toBe(1)
+      expect(rawTransaction.expiration).toBeDefined()
+      expect(rawTransaction.burns.length).toBe(0)
+      expect(rawTransaction.mints.length).toBe(0)
+      expect(rawTransaction.spends.length).toBe(1)
+      expect(rawTransaction.fee).toBeGreaterThan(0n)
     })
   })
 
@@ -944,7 +1059,7 @@ describe('Accounts', () => {
 
         const assetId = Buffer.from('thisisafakeidentifier', 'hex')
         await expect(
-          node.wallet.mint(node.memPool, account, {
+          node.wallet.mint(account, {
             assetId,
             fee: BigInt(0),
             expirationDelta: node.config.get('transactionExpirationDelta'),
@@ -953,39 +1068,6 @@ describe('Accounts', () => {
         ).rejects.toThrow(
           `Asset not found. Cannot mint for identifier '${assetId.toString('hex')}'`,
         )
-      })
-    })
-
-    describe('for an identifier not owned by the account', () => {
-      it('throws an unauthorized exception', async () => {
-        const { node } = await nodeTest.createSetup()
-        const accountA = await useAccountFixture(node.wallet, 'accountA')
-        const accountB = await useAccountFixture(node.wallet, 'accountB')
-
-        const mined = await useMinerBlockFixture(node.chain, 2, accountA)
-        await expect(node.chain).toAddBlock(mined)
-        await node.wallet.updateHead()
-
-        const asset = new Asset(accountA.spendingKey, 'mint-asset', 'metadata')
-        const value = BigInt(10)
-        const mintBlock = await useMintBlockFixture({
-          node,
-          account: accountA,
-          asset,
-          value,
-          sequence: 3,
-        })
-        await expect(node.chain).toAddBlock(mintBlock)
-        await node.wallet.updateHead()
-
-        await expect(
-          node.wallet.mint(node.memPool, accountB, {
-            assetId: asset.id(),
-            fee: BigInt(0),
-            expirationDelta: node.config.get('transactionExpirationDelta'),
-            value: BigInt(1),
-          }),
-        ).rejects.toThrow(`Unauthorized to mint for asset '${asset.id().toString('hex')}'`)
       })
     })
 
@@ -1013,7 +1095,7 @@ describe('Accounts', () => {
 
         const mintValueB = BigInt(10)
         const transaction = await useTxFixture(node.wallet, account, account, () => {
-          return node.wallet.mint(node.memPool, account, {
+          return node.wallet.mint(account, {
             assetId: asset.id(),
             fee: BigInt(0),
             expirationDelta: node.config.get('transactionExpirationDelta'),
@@ -1023,7 +1105,7 @@ describe('Accounts', () => {
 
         const mintBlock = await node.chain.newBlock(
           [transaction],
-          await node.strategy.createMinersFee(transaction.fee(), 4, generateKey().spending_key),
+          await node.strategy.createMinersFee(transaction.fee(), 4, generateKey().spendingKey),
         )
         await expect(node.chain).toAddBlock(mintBlock)
         await node.wallet.updateHead()
@@ -1047,12 +1129,18 @@ describe('Accounts', () => {
 
         const asset = new Asset(account.spendingKey, 'mint-asset', 'metadata')
         const mintValue = BigInt(10)
+        const mintData = {
+          name: asset.name().toString('utf8'),
+          metadata: asset.metadata().toString('utf8'),
+          value: mintValue,
+          isNewAsset: true,
+        }
 
         const transaction = await usePostTxFixture({
           node: node,
           wallet: node.wallet,
           from: account,
-          mints: [{ asset, value: mintValue }],
+          mints: [mintData],
         })
 
         expect(transaction.mints).toEqual([{ asset: asset, value: mintValue }])
@@ -1159,23 +1247,30 @@ describe('Accounts', () => {
       const asset = new Asset(account.spendingKey, 'mint-asset', 'metadata')
       const assetId = asset.id()
       const mintValue = BigInt(10)
+      const mintData = {
+        name: asset.name().toString('utf8'),
+        metadata: asset.metadata().toString('utf8'),
+        value: mintValue,
+        isNewAsset: true,
+      }
+
       // Mint some coins
       const blockB = await useBlockFixture(node.chain, async () => {
-        const raw = await node.wallet.createTransaction(
+        const raw = await node.wallet.createTransaction({
           account,
-          [],
-          [{ asset, value: mintValue }],
-          [],
-          BigInt(0),
-          0,
-          0,
-        )
+          mints: [mintData],
+          fee: 0n,
+          expiration: 0,
+        })
 
-        const transaction = await node.wallet.postTransaction(raw, node.memPool)
+        const transaction = await node.wallet.post({
+          transaction: raw,
+          account,
+        })
 
         return node.chain.newBlock(
           [transaction],
-          await node.strategy.createMinersFee(transaction.fee(), 3, generateKey().spending_key),
+          await node.strategy.createMinersFee(transaction.fee(), 3, generateKey().spendingKey),
         )
       })
       await expect(node.chain).toAddBlock(blockB)
@@ -1188,7 +1283,7 @@ describe('Accounts', () => {
       // TODO(mat): This test is flaky. The order of notes may change, so if
       // this is failing, change this to `getNote(1)`. There's a ticket to
       // resolve this, but trying to focus on phase 3 first.
-      const outputNote = blockB.transactions[1].getNote(0)
+      const outputNote = blockB.transactions[1].getNote(1)
       const note = outputNote.decryptNoteForOwner(account.incomingViewKey)
       Assert.isNotUndefined(note)
 
@@ -1197,10 +1292,42 @@ describe('Accounts', () => {
         account,
         assetId,
         BigInt(2),
+        0,
       )
+
       expect(amount).toEqual(mintValue)
       expect(notes).toHaveLength(1)
       expect(notes[0].note).toMatchObject(note)
+    })
+
+    it('should return spendable notes dependant on confirmations', async () => {
+      const { node } = await nodeTest.createSetup()
+      const account = await useAccountFixture(node.wallet)
+
+      const mined = await useMinerBlockFixture(node.chain, 2, account)
+      await expect(node.chain).toAddBlock(mined)
+      await node.wallet.updateHead()
+
+      const value = BigInt(10)
+      const assetId = Asset.nativeId()
+
+      const invalidConfirmations = 100
+      const validConfirmations = 0
+
+      const { amount: validAmount, notes: validNotes } = await node.wallet.createSpendsForAsset(
+        account,
+        assetId,
+        value,
+        validConfirmations,
+      )
+      expect(validAmount).toEqual(2000000000n)
+      expect(validNotes).toHaveLength(1)
+
+      // No notes should be returned
+      const { amount: invalidAmount, notes: invalidNotes } =
+        await node.wallet.createSpendsForAsset(account, assetId, value, invalidConfirmations)
+      expect(invalidAmount).toEqual(BigInt(0))
+      expect(invalidNotes).toHaveLength(0)
     })
   })
 
@@ -1242,12 +1369,40 @@ describe('Accounts', () => {
       const tx = await useTxFixture(node.wallet, accountA, accountB)
 
       expect(decryptSpy).toHaveBeenCalledTimes(1)
-      expect(decryptSpy).toHaveBeenLastCalledWith(tx, null, [accountA, accountB])
+      expect(decryptSpy).toHaveBeenLastCalledWith(tx, null, false, [accountA, accountB])
 
       await node.wallet.addPendingTransaction(tx)
 
       // notes should not have been decrypted again
       expect(decryptSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it('should add transactions if an account spent a note but did not receive change', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+      const accountB = await useAccountFixture(node.wallet, 'b')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      const { unconfirmed } = await accountA.getBalance(Asset.nativeId(), 0)
+
+      expect(unconfirmed).toEqual(2000000000n)
+
+      // send a transaction that spends all of accountA's balance
+      const tx = await useTxFixture(
+        node.wallet,
+        accountA,
+        accountB,
+        undefined,
+        unconfirmed - 1n,
+      )
+
+      await node.wallet.addPendingTransaction(tx)
+
+      await expect(accountA.hasTransaction(tx.hash())).resolves.toBe(true)
     })
   })
 
@@ -1396,6 +1551,245 @@ describe('Accounts', () => {
       accountAHead = await accountA.getHead()
       expect(accountAHead?.hash).toEqualHash(blockA1.header.hash)
     })
+
+    it('should update balance hash and sequence for each block', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+      const accountB = await useAccountFixture(node.wallet, 'b')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA1.header.hash,
+        sequence: blockA1.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+      await expect(accountB.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA1.header.hash,
+        sequence: blockA1.header.sequence,
+        unconfirmed: 0n,
+      })
+
+      const blockA2 = await useMinerBlockFixture(node.chain, undefined, accountB, node.wallet)
+      await expect(node.chain).toAddBlock(blockA2)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA2.header.hash,
+        sequence: blockA2.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+      await expect(accountB.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA2.header.hash,
+        sequence: blockA2.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+    })
+
+    it('should update balance hash and sequence for each asset in each block', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA1.header.hash,
+        sequence: blockA1.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+
+      const asset = new Asset(accountA.spendingKey, 'fakeasset', 'metadata')
+      const value = BigInt(10)
+      const mintBlock = await useMintBlockFixture({
+        node,
+        account: accountA,
+        asset,
+        value,
+        sequence: 3,
+      })
+      await expect(node.chain).toAddBlock(mintBlock)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: mintBlock.header.hash,
+        sequence: mintBlock.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+      await expect(accountA.getUnconfirmedBalance(asset.id())).resolves.toMatchObject({
+        blockHash: mintBlock.header.hash,
+        sequence: mintBlock.header.sequence,
+        unconfirmed: value,
+      })
+
+      const blockA3 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA3)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA3.header.hash,
+        sequence: blockA3.header.sequence,
+        unconfirmed: 4000000000n,
+      })
+      await expect(accountA.getUnconfirmedBalance(asset.id())).resolves.toMatchObject({
+        blockHash: blockA3.header.hash,
+        sequence: blockA3.header.sequence,
+        unconfirmed: value,
+      })
+    })
+
+    it('should save assets from the chain the account does not own', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+      const accountB = await useAccountFixture(node.wallet, 'b')
+
+      const minerBlock = await useMinerBlockFixture(
+        node.chain,
+        undefined,
+        accountA,
+        node.wallet,
+      )
+      await expect(node.chain).toAddBlock(minerBlock)
+      await node.wallet.updateHead()
+
+      const asset = new Asset(accountA.spendingKey, 'fakeasset', 'metadata')
+      const value = BigInt(10)
+      const mintBlock = await useMintBlockFixture({
+        node,
+        account: accountA,
+        asset,
+        value,
+        sequence: 3,
+      })
+      await expect(node.chain).toAddBlock(mintBlock)
+      await node.wallet.updateHead()
+
+      const transaction = await usePostTxFixture({
+        node,
+        wallet: node.wallet,
+        from: accountA,
+        to: accountB,
+        assetId: asset.id(),
+        amount: BigInt(1n),
+      })
+      const block = await useMinerBlockFixture(node.chain, undefined, undefined, undefined, [
+        transaction,
+      ])
+      await expect(node.chain).toAddBlock(block)
+      await node.wallet.updateHead()
+
+      expect(await accountA['walletDb'].getAsset(accountA, asset.id())).toEqual({
+        blockHash: mintBlock.header.hash,
+        createdTransactionHash: mintBlock.transactions[1].hash(),
+        id: asset.id(),
+        metadata: asset.metadata(),
+        name: asset.name(),
+        owner: Buffer.from(accountA.publicAddress, 'hex'),
+        sequence: mintBlock.header.sequence,
+        supply: value,
+      })
+      expect(await accountB['walletDb'].getAsset(accountB, asset.id())).toEqual({
+        blockHash: block.header.hash,
+        createdTransactionHash: mintBlock.transactions[1].hash(),
+        id: asset.id(),
+        metadata: asset.metadata(),
+        name: asset.name(),
+        owner: Buffer.from(accountA.publicAddress, 'hex'),
+        sequence: block.header.sequence,
+        supply: null,
+      })
+    })
+
+    it('should add transactions to accounts if the account spends, but does not receive notes', async () => {
+      const { node } = await nodeTest.createSetup()
+      const { node: node2 } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+      const accountB = await useAccountFixture(node.wallet, 'b')
+
+      // import accountB to second node not used to create transaction
+      const accountAImport = await node2.wallet.importAccount(accountA)
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await expect(node2.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+      await node2.wallet.updateHead()
+
+      const { unconfirmed } = await accountAImport.getBalance(Asset.nativeId(), 0)
+
+      expect(unconfirmed).toEqual(2000000000n)
+
+      // create transaction spending all of A's balance
+      const { block: blockA2, transaction } = await useBlockWithTx(
+        node,
+        accountA,
+        accountB,
+        false,
+        {
+          fee: Number(unconfirmed - 1n),
+        },
+      )
+      await expect(node.chain).toAddBlock(blockA2)
+      await expect(node2.chain).toAddBlock(blockA2)
+      await node.wallet.updateHead()
+
+      await expect(accountA.hasTransaction(transaction.hash())).resolves.toBe(true)
+      await expect(accountAImport.hasTransaction(transaction.hash())).resolves.toBe(false)
+
+      // update node2 so that transaction is connected to imported account
+      await node2.wallet.updateHead()
+
+      await expect(accountAImport.hasTransaction(transaction.hash())).resolves.toBe(true)
+    })
+  })
+
+  describe('getAssetStatus', () => {
+    it('should return the correct status for assets', async () => {
+      const { node } = await nodeTest.createSetup()
+      const account = await useAccountFixture(node.wallet)
+
+      const mined = await useMinerBlockFixture(node.chain, 2, account)
+      await expect(node.chain).toAddBlock(mined)
+      await node.wallet.updateHead()
+
+      const asset = new Asset(account.spendingKey, 'asset', 'metadata')
+      const value = BigInt(10)
+      const mintBlock = await useMintBlockFixture({
+        node,
+        account,
+        asset,
+        value,
+      })
+
+      let assetValue = await node.wallet.walletDb.getAsset(account, asset.id())
+      Assert.isNotUndefined(assetValue)
+
+      // Check status before added to a block
+      expect(await node.wallet.getAssetStatus(account, assetValue)).toEqual(AssetStatus.PENDING)
+
+      // Add to a block and check different confirmation ranges
+      await expect(node.chain).toAddBlock(mintBlock)
+      await node.wallet.updateHead()
+      assetValue = await node.wallet.walletDb.getAsset(account, asset.id())
+      Assert.isNotUndefined(assetValue)
+      expect(await node.wallet.getAssetStatus(account, assetValue)).toEqual(
+        AssetStatus.CONFIRMED,
+      )
+      expect(
+        await node.wallet.getAssetStatus(account, assetValue, { confirmations: 2 }),
+      ).toEqual(AssetStatus.UNCONFIRMED)
+
+      // Remove the head and check status
+      jest.spyOn(account, 'getHead').mockResolvedValueOnce(Promise.resolve(null))
+      expect(await node.wallet.getAssetStatus(account, assetValue)).toEqual(AssetStatus.UNKNOWN)
+    })
   })
 
   describe('disconnectBlock', () => {
@@ -1448,9 +1842,9 @@ describe('Accounts', () => {
 
       await node.wallet.updateHead()
 
-      let accoundAHead = await accountA.getHead()
+      let accountAHead = await accountA.getHead()
 
-      expect(accoundAHead?.hash).toEqualHash(blockA2.header.hash)
+      expect(accountAHead?.hash).toEqualHash(blockA2.header.hash)
 
       await node.chain.db.transaction(async (tx) => {
         await node.chain.disconnect(blockA2, tx)
@@ -1458,9 +1852,9 @@ describe('Accounts', () => {
 
       await node.wallet.updateHead()
 
-      accoundAHead = await accountA.getHead()
+      accountAHead = await accountA.getHead()
 
-      expect(accoundAHead?.hash).toEqualHash(blockA2.header.previousBlockHash)
+      expect(accountAHead?.hash).toEqualHash(blockA2.header.previousBlockHash)
     })
 
     it('should update the account unconfirmed balance', async () => {
@@ -1564,6 +1958,335 @@ describe('Accounts', () => {
       await node.wallet.disconnectBlock(blockA1.header)
 
       await expect(accountA.hasTransaction(transaction.hash())).resolves.toEqual(false)
+    })
+
+    it('should update balance hash and sequence for each block', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+      const accountB = await useAccountFixture(node.wallet, 'b')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA1.header.hash,
+        sequence: blockA1.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+      await expect(accountB.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA1.header.hash,
+        sequence: blockA1.header.sequence,
+        unconfirmed: 0n,
+      })
+
+      const blockA2 = await useMinerBlockFixture(node.chain, undefined, accountB, node.wallet)
+      await expect(node.chain).toAddBlock(blockA2)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA2.header.hash,
+        sequence: blockA2.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+      await expect(accountB.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA2.header.hash,
+        sequence: blockA2.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+
+      await node.wallet.disconnectBlock(blockA2.header)
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA1.header.hash,
+        sequence: blockA1.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+      await expect(accountB.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA1.header.hash,
+        sequence: blockA1.header.sequence,
+        unconfirmed: 0n,
+      })
+    })
+
+    it('should update balance hash and sequence for each asset in each block', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA1.header.hash,
+        sequence: blockA1.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+
+      const asset = new Asset(accountA.spendingKey, 'fakeasset', 'metadata')
+      const value = BigInt(10)
+      const mintBlock = await useMintBlockFixture({
+        node,
+        account: accountA,
+        asset,
+        value,
+        sequence: 3,
+      })
+      await expect(node.chain).toAddBlock(mintBlock)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: mintBlock.header.hash,
+        sequence: mintBlock.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+      await expect(accountA.getUnconfirmedBalance(asset.id())).resolves.toMatchObject({
+        blockHash: mintBlock.header.hash,
+        sequence: mintBlock.header.sequence,
+        unconfirmed: value,
+      })
+
+      const blockA3 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA3)
+      await node.wallet.updateHead()
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: blockA3.header.hash,
+        sequence: blockA3.header.sequence,
+        unconfirmed: 4000000000n,
+      })
+      await expect(accountA.getUnconfirmedBalance(asset.id())).resolves.toMatchObject({
+        blockHash: blockA3.header.hash,
+        sequence: blockA3.header.sequence,
+        unconfirmed: value,
+      })
+
+      await node.wallet.disconnectBlock(blockA3.header)
+
+      await expect(accountA.getUnconfirmedBalance(Asset.nativeId())).resolves.toMatchObject({
+        blockHash: mintBlock.header.hash,
+        sequence: mintBlock.header.sequence,
+        unconfirmed: 2000000000n,
+      })
+      await expect(accountA.getUnconfirmedBalance(asset.id())).resolves.toMatchObject({
+        blockHash: mintBlock.header.hash,
+        sequence: mintBlock.header.sequence,
+        unconfirmed: value,
+      })
+    })
+  })
+
+  describe('resetAccount', () => {
+    it('should create a new account with the same keys but different id', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+
+      await node.wallet.resetAccount(accountA)
+
+      const newAccountA = node.wallet.getAccountByName('a')
+
+      Assert.isNotNull(newAccountA)
+
+      expect(newAccountA.id).not.toEqual(accountA.id)
+
+      expect(newAccountA.spendingKey).toEqual(accountA.spendingKey)
+    })
+
+    it('should set the reset account balance to 0', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+
+      await node.wallet.resetAccount(accountA)
+
+      const newAccountA = node.wallet.getAccountByName('a')
+
+      Assert.isNotNull(newAccountA)
+
+      expect(newAccountA.id).not.toEqual(accountA.id)
+
+      await expect(newAccountA.getBalance(Asset.nativeId(), 0)).resolves.toMatchObject({
+        confirmed: 0n,
+        unconfirmed: 0n,
+      })
+    })
+
+    it('should set the reset account head to null', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+
+      await node.wallet.resetAccount(accountA)
+
+      const newAccountA = node.wallet.getAccountByName('a')
+
+      Assert.isNotNull(newAccountA)
+
+      expect(newAccountA.id).not.toEqual(accountA.id)
+
+      await expect(newAccountA.getHead()).resolves.toBeNull()
+    })
+
+    it('should mark the account for deletion', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+
+      await node.wallet.resetAccount(accountA)
+
+      await expect(node.wallet.walletDb.accountIdsToCleanup.has(accountA.id)).resolves.toBe(
+        true,
+      )
+    })
+  })
+
+  describe('getTransactionType', () => {
+    it('should return miner type for minersFee transactions', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      const transaction = blockA1.transactions[0]
+
+      const transactionValue = await accountA.getTransaction(transaction.hash())
+
+      Assert.isNotUndefined(transactionValue)
+
+      await expect(node.wallet.getTransactionType(accountA, transactionValue)).resolves.toEqual(
+        TransactionType.MINER,
+      )
+    })
+
+    it('should return send type for outgoing transactions', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+      const accountB = await useAccountFixture(node.wallet, 'b')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      const { block: blockA2, transaction } = await useBlockWithTx(node, accountA, accountB)
+      await expect(node.chain).toAddBlock(blockA2)
+      await node.wallet.updateHead()
+
+      const transactionValue = await accountA.getTransaction(transaction.hash())
+
+      Assert.isNotUndefined(transactionValue)
+
+      await expect(node.wallet.getTransactionType(accountA, transactionValue)).resolves.toEqual(
+        TransactionType.SEND,
+      )
+    })
+
+    it('should return send type for mint transactions', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const account = await useAccountFixture(node.wallet, 'a')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, account, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      const asset = new Asset(account.spendingKey, 'fakeasset', 'metadata')
+      const value = BigInt(10)
+      const mintBlock = await useMintBlockFixture({
+        node,
+        account,
+        asset,
+        value,
+        sequence: 3,
+      })
+      await expect(node.chain).toAddBlock(mintBlock)
+      await node.wallet.updateHead()
+
+      const transaction = mintBlock.transactions.find((tx) => !tx.isMinersFee())
+
+      Assert.isNotUndefined(transaction)
+
+      const transactionValue = await account.getTransaction(transaction.hash())
+
+      Assert.isNotUndefined(transactionValue)
+
+      await expect(node.wallet.getTransactionType(account, transactionValue)).resolves.toEqual(
+        TransactionType.SEND,
+      )
+    })
+
+    it('should return send type for burn transactions', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const account = await useAccountFixture(node.wallet, 'a')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, account, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      const asset = new Asset(account.spendingKey, 'fakeasset', 'metadata')
+      const value = BigInt(10)
+      const mintBlock = await useMintBlockFixture({
+        node,
+        account,
+        asset,
+        value,
+        sequence: 3,
+      })
+      await expect(node.chain).toAddBlock(mintBlock)
+      await node.wallet.updateHead()
+
+      const burnValue = BigInt(2)
+      const burnBlock = await useBurnBlockFixture({
+        node,
+        account,
+        asset,
+        value: burnValue,
+        sequence: 4,
+      })
+      await expect(node.chain).toAddBlock(burnBlock)
+      await node.wallet.updateHead()
+
+      const transaction = burnBlock.transactions.find((tx) => !tx.isMinersFee())
+
+      Assert.isNotUndefined(transaction)
+
+      const transactionValue = await account.getTransaction(transaction.hash())
+
+      Assert.isNotUndefined(transactionValue)
+
+      await expect(node.wallet.getTransactionType(account, transactionValue)).resolves.toEqual(
+        TransactionType.SEND,
+      )
+    })
+
+    it('should return receive type for incoming transactions', async () => {
+      const { node } = await nodeTest.createSetup()
+
+      const accountA = await useAccountFixture(node.wallet, 'a')
+      const accountB = await useAccountFixture(node.wallet, 'b')
+
+      const blockA1 = await useMinerBlockFixture(node.chain, undefined, accountA, node.wallet)
+      await expect(node.chain).toAddBlock(blockA1)
+      await node.wallet.updateHead()
+
+      const { block: blockA2, transaction } = await useBlockWithTx(node, accountA, accountB)
+      await expect(node.chain).toAddBlock(blockA2)
+      await node.wallet.updateHead()
+
+      const transactionValue = await accountB.getTransaction(transaction.hash())
+
+      Assert.isNotUndefined(transactionValue)
+
+      await expect(node.wallet.getTransactionType(accountB, transactionValue)).resolves.toEqual(
+        TransactionType.RECEIVE,
+      )
     })
   })
 })

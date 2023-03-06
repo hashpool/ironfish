@@ -5,14 +5,15 @@
 use crate::errors::IronfishError;
 
 use super::serializing::{bytes_to_hex, hex_to_bytes, read_scalar};
-use bip39::{Language, Mnemonic};
+pub use bip39::Language;
+use bip39::Mnemonic;
 use blake2b_simd::Params as Blake2b;
 use blake2s_simd::Params as Blake2s;
 use group::GroupEncoding;
 use ironfish_zkp::constants::{
     CRH_IVK_PERSONALIZATION, PROOF_GENERATION_KEY_GENERATOR, SPENDING_KEY_GENERATOR,
 };
-use ironfish_zkp::{ProofGenerationKey, ViewingKey};
+use ironfish_zkp::ProofGenerationKey;
 use jubjub::SubgroupPoint;
 use rand::prelude::*;
 
@@ -30,6 +31,8 @@ mod test;
 
 const EXPANDED_SPEND_BLAKE2_KEY: &[u8; 16] = b"Iron Fish Money ";
 
+pub const SPEND_KEY_SIZE: usize = 32;
+
 /// A single private key generates multiple other key parts that can
 /// be used to allow various forms of access to a commitment note:
 ///
@@ -40,7 +43,7 @@ const EXPANDED_SPEND_BLAKE2_KEY: &[u8; 16] = b"Iron Fish Money ";
 pub struct SaplingKey {
     /// The private (secret) key from which all the other key parts are derived.
     /// The expanded form of this key is required before a note can be spent.
-    spending_key: [u8; 32],
+    spending_key: [u8; SPEND_KEY_SIZE],
 
     /// Part of the expanded form of the spending key, generally referred to as
     /// `ask` in the literature. Derived from spending key using a seeded
@@ -59,27 +62,21 @@ pub struct SaplingKey {
     /// keys needed to decrypt the note's contents.
     pub(crate) outgoing_viewing_key: OutgoingViewKey,
 
-    /// Part of the full viewing key. Generally referred to as
-    /// `ak` in the literature. Derived from spend_authorizing_key using scalar
-    /// multiplication in Sapling. Used to construct incoming viewing key.
-    pub(crate) authorizing_key: SubgroupPoint,
-
-    /// Part of the full viewing key. Generally referred to as
-    /// `nk` in the literature. Derived from proof_authorizing_key using scalar
-    /// multiplication. Used to construct incoming viewing key.
-    pub(crate) nullifier_deriving_key: SubgroupPoint,
+    /// Part of the full viewing key. Contains ak/nk from literature, used for deriving nullifiers
+    /// and therefore spends
+    pub(crate) view_key: ViewKey,
 
     /// Part of the payment_address. Generally referred to as
     /// `ivk` in the literature. Derived from authorizing key and
     /// nullifier deriving key. Used to construct payment address and
     /// transmission key. This key allows the receiver of a note to decrypt its
-    /// contents.
+    /// contents. Derived from view_key contents, this is materialized for convenience
     pub(crate) incoming_viewing_key: IncomingViewKey,
 }
 
 impl SaplingKey {
     /// Construct a new key from an array of bytes
-    pub fn new(spending_key: [u8; 32]) -> Result<Self, IronfishError> {
+    pub fn new(spending_key: [u8; SPEND_KEY_SIZE]) -> Result<Self, IronfishError> {
         let spend_authorizing_key =
             jubjub::Fr::from_bytes_wide(&Self::convert_key(spending_key, 0));
 
@@ -90,13 +87,18 @@ impl SaplingKey {
         let proof_authorizing_key =
             jubjub::Fr::from_bytes_wide(&Self::convert_key(spending_key, 1));
 
-        let mut outgoing_viewing_key = [0; 32];
-        outgoing_viewing_key[0..32].clone_from_slice(&Self::convert_key(spending_key, 2)[0..32]);
+        let mut outgoing_viewing_key = [0; SPEND_KEY_SIZE];
+        outgoing_viewing_key[0..SPEND_KEY_SIZE]
+            .clone_from_slice(&Self::convert_key(spending_key, 2)[0..SPEND_KEY_SIZE]);
         let outgoing_viewing_key = OutgoingViewKey {
             view_key: outgoing_viewing_key,
         };
         let authorizing_key = SPENDING_KEY_GENERATOR * spend_authorizing_key;
         let nullifier_deriving_key = PROOF_GENERATION_KEY_GENERATOR * proof_authorizing_key;
+        let view_key = ViewKey {
+            authorizing_key,
+            nullifier_deriving_key,
+        };
         let incoming_viewing_key = IncomingViewKey {
             view_key: Self::hash_viewing_key(&authorizing_key, &nullifier_deriving_key)?,
         };
@@ -106,15 +108,14 @@ impl SaplingKey {
             spend_authorizing_key,
             proof_authorizing_key,
             outgoing_viewing_key,
-            authorizing_key,
-            nullifier_deriving_key,
+            view_key,
             incoming_viewing_key,
         })
     }
 
     /// Load a new key from a Read implementation (e.g: socket, file)
     pub fn read<R: io::Read>(reader: &mut R) -> Result<Self, IronfishError> {
-        let mut spending_key = [0; 32];
+        let mut spending_key = [0; SPEND_KEY_SIZE];
         reader.read_exact(&mut spending_key)?;
         Self::new(spending_key)
     }
@@ -124,27 +125,15 @@ impl SaplingKey {
         match hex_to_bytes(value) {
             Err(_) => Err(IronfishError::InvalidPaymentAddress),
             Ok(bytes) => {
-                if bytes.len() != 32 {
+                if bytes.len() != SPEND_KEY_SIZE {
                     Err(IronfishError::InvalidPaymentAddress)
                 } else {
-                    let mut byte_arr = [0; 32];
-                    byte_arr.clone_from_slice(&bytes[0..32]);
+                    let mut byte_arr = [0; SPEND_KEY_SIZE];
+                    byte_arr.clone_from_slice(&bytes[0..SPEND_KEY_SIZE]);
                     Self::new(byte_arr)
                 }
             }
         }
-    }
-
-    /// Load a key from a string of words to be decoded into bytes.
-    pub fn from_words(language_code: &str, value: String) -> Result<Self, IronfishError> {
-        let language = Language::from_language_code(language_code)
-            .ok_or(IronfishError::InvalidLanguageEncoding)?;
-        let mnemonic = Mnemonic::from_phrase(&value, language)
-            .map_err(|_| IronfishError::InvalidPaymentAddress)?;
-        let bytes = mnemonic.entropy();
-        let mut byte_arr = [0; 32];
-        byte_arr.clone_from_slice(&bytes[0..32]);
-        Self::new(byte_arr)
     }
 
     /// Generate a new random secret key.
@@ -153,7 +142,7 @@ impl SaplingKey {
     /// first time.
     /// Note that unlike `new`, this function always successfully returns a value.
     pub fn generate_key() -> Self {
-        let spending_key: [u8; 32] = random();
+        let spending_key: [u8; SPEND_KEY_SIZE] = random();
         loop {
             if let Ok(key) = Self::new(spending_key) {
                 return key;
@@ -169,7 +158,7 @@ impl SaplingKey {
     // Write a bytes representation of this key to the provided stream
     pub fn write<W: io::Write>(&self, mut writer: W) -> Result<(), IronfishError> {
         let num_bytes_written = writer.write(&self.spending_key)?;
-        if num_bytes_written != 32 {
+        if num_bytes_written != SPEND_KEY_SIZE {
             return Err(IronfishError::InvalidData);
         }
 
@@ -177,7 +166,7 @@ impl SaplingKey {
     }
 
     /// Retrieve the private spending key
-    pub fn spending_key(&self) -> [u8; 32] {
+    pub fn spending_key(&self) -> [u8; SPEND_KEY_SIZE] {
         self.spending_key
     }
 
@@ -193,11 +182,19 @@ impl SaplingKey {
     /// a seed. This isn't strictly necessary for private key, but view keys
     /// will need a direct mapping. The private key could still be generated
     /// using bip-32 and bip-39 if desired.
-    pub fn words_spending_key(&self, language_code: &str) -> Result<String, IronfishError> {
-        let language = Language::from_language_code(language_code)
-            .ok_or(IronfishError::InvalidLanguageEncoding)?;
-        let mnemonic = Mnemonic::from_entropy(&self.spending_key, language).unwrap();
-        Ok(mnemonic.phrase().to_string())
+    pub fn to_words(&self, language: Language) -> Result<Mnemonic, IronfishError> {
+        Mnemonic::from_entropy(&self.spending_key, language)
+            .map_err(|_| IronfishError::InvalidEntropy)
+    }
+
+    /// Takes a bip-39 phrase as a string and turns it into a SaplingKey instance
+    pub fn from_words(words: String, language: Language) -> Result<Self, IronfishError> {
+        let mnemonic = Mnemonic::from_phrase(&words, language)
+            .map_err(|_| IronfishError::InvalidMnemonicString)?;
+        let bytes = mnemonic.entropy();
+        let mut byte_arr = [0; SPEND_KEY_SIZE];
+        byte_arr.clone_from_slice(&bytes[0..SPEND_KEY_SIZE]);
+        Self::new(byte_arr)
     }
 
     /// Retrieve the publicly visible outgoing viewing key
@@ -210,29 +207,16 @@ impl SaplingKey {
         &self.incoming_viewing_key
     }
 
-    /// Retrieve both the view keys. These would normally used for third-party audits
-    /// or for light clients.
-    pub fn view_keys(&self) -> ViewKeys {
-        ViewKeys {
-            incoming: self.incoming_view_key().clone(),
-            outgoing: self.outgoing_view_key().clone(),
-        }
-    }
-
-    /// Adapter to convert this key to a viewing key for use in sapling
-    /// functions.
-    pub(crate) fn sapling_viewing_key(&self) -> ViewingKey {
-        ViewingKey {
-            ak: self.authorizing_key,
-            nk: self.nullifier_deriving_key,
-        }
+    /// Retrieve the publicly visible view key
+    pub fn view_key(&self) -> &ViewKey {
+        &self.view_key
     }
 
     /// Adapter to convert this key to a proof generation key for use in
     /// sapling functions
     pub(crate) fn sapling_proof_generation_key(&self) -> ProofGenerationKey {
         ProofGenerationKey {
-            ak: self.authorizing_key,
+            ak: self.view_key.authorizing_key,
             nsk: self.proof_authorizing_key,
         }
     }
@@ -247,7 +231,7 @@ impl SaplingKey {
     ///  *  `spending_key` The 32 byte spending key
     ///  *  `modifier` a byte to add to tweak the hash for each of the three
     ///     values
-    fn convert_key(spending_key: [u8; 32], modifier: u8) -> [u8; 64] {
+    fn convert_key(spending_key: [u8; SPEND_KEY_SIZE], modifier: u8) -> [u8; 64] {
         let mut hasher = Blake2b::new()
             .hash_length(64)
             .personal(EXPANDED_SPEND_BLAKE2_KEY)

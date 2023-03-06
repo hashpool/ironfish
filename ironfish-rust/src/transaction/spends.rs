@@ -29,7 +29,7 @@ use jubjub::ExtendedPoint;
 use rand::thread_rng;
 use std::io;
 
-use super::utils::verify_spend_proof;
+use super::{utils::verify_spend_proof, TRANSACTION_PUBLIC_KEY_SIZE};
 
 /// Parameters used when constructing proof that the spender owns a note with
 /// a given value.
@@ -115,7 +115,9 @@ impl SpendBuilder {
 
         // Bytes to be placed into the nullifier set to verify whether this note
         // has been previously spent.
-        let nullifier = self.note.nullifier(spender_key, self.witness_position);
+        let nullifier = self
+            .note
+            .nullifier(&spender_key.view_key, self.witness_position);
 
         let blank_signature = {
             let buf = [0u8; 64];
@@ -165,7 +167,7 @@ impl UnsignedSpendDescription {
             redjubjub::PublicKey::from_private(&randomized_private_key, SPENDING_KEY_GENERATOR);
 
         let transaction_randomized_public_key =
-            redjubjub::PublicKey(spender_key.authorizing_key.into())
+            redjubjub::PublicKey(spender_key.view_key.authorizing_key.into())
                 .randomize(self.public_key_randomness, SPENDING_KEY_GENERATOR);
 
         if randomized_public_key.0 != transaction_randomized_public_key.0 {
@@ -173,7 +175,8 @@ impl UnsignedSpendDescription {
         }
 
         let mut data_to_be_signed = [0; 64];
-        data_to_be_signed[..32].copy_from_slice(&transaction_randomized_public_key.0.to_bytes());
+        data_to_be_signed[..TRANSACTION_PUBLIC_KEY_SIZE]
+            .copy_from_slice(&transaction_randomized_public_key.0.to_bytes());
         data_to_be_signed[32..].copy_from_slice(&signature_hash[..]);
 
         self.description.authorizing_signature = randomized_private_key.sign(
@@ -401,7 +404,7 @@ mod test {
         let spend = SpendBuilder::new(note, &witness);
 
         let public_key_randomness = jubjub::Fr::random(thread_rng());
-        let randomized_public_key = redjubjub::PublicKey(key.authorizing_key.into())
+        let randomized_public_key = redjubjub::PublicKey(key.view_key.authorizing_key.into())
             .randomize(public_key_randomness, SPENDING_KEY_GENERATOR);
 
         // signature comes from transaction, normally

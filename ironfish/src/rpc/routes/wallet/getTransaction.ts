@@ -5,10 +5,18 @@ import * as yup from 'yup'
 import { Note } from '../../../primitives/note'
 import { CurrencyUtils } from '../../../utils'
 import { ApiNamespace, router } from '../router'
-import { RpcAccountDecryptedNote, serializeRpcAccountTransaction } from './types'
+import {
+  getAssetBalanceDeltas,
+  RpcAccountDecryptedNote,
+  serializeRpcAccountTransaction,
+} from './types'
 import { getAccount } from './utils'
 
-export type GetAccountTransactionRequest = { account?: string; hash: string }
+export type GetAccountTransactionRequest = {
+  hash: string
+  account?: string
+  confirmations?: number
+}
 
 export type GetAccountTransactionResponse = {
   account: string
@@ -25,15 +33,16 @@ export type GetAccountTransactionResponse = {
     burnsCount: number
     timestamp: number
     notes: RpcAccountDecryptedNote[]
-    assetBalanceDeltas: Array<{ assetId: string; delta: string }>
+    assetBalanceDeltas: Array<{ assetId: string; assetName: string; delta: string }>
   } | null
 }
 
 export const GetAccountTransactionRequestSchema: yup.ObjectSchema<GetAccountTransactionRequest> =
   yup
     .object({
-      account: yup.string().strip(true),
+      account: yup.string(),
       hash: yup.string().defined(),
+      confirmations: yup.string(),
     })
     .defined()
 
@@ -58,7 +67,8 @@ export const GetAccountTransactionResponseSchema: yup.ObjectSchema<GetAccountTra
             .array(
               yup
                 .object({
-                  owner: yup.boolean().defined(),
+                  isOwner: yup.boolean().defined(),
+                  owner: yup.string().defined(),
                   value: yup.string().defined(),
                   assetId: yup.string().defined(),
                   assetName: yup.string().defined(),
@@ -74,6 +84,7 @@ export const GetAccountTransactionResponseSchema: yup.ObjectSchema<GetAccountTra
               yup
                 .object({
                   assetId: yup.string().defined(),
+                  assetName: yup.string().defined(),
                   delta: yup.string().defined(),
                 })
                 .defined(),
@@ -101,7 +112,7 @@ router.register<typeof GetAccountTransactionRequestSchema, GetAccountTransaction
       })
     }
 
-    const notesByAccount = await node.wallet.decryptNotes(transaction.transaction, null, [
+    const notesByAccount = await node.wallet.decryptNotes(transaction.transaction, null, true, [
       account,
     ])
     const notes = notesByAccount.get(account.id) ?? []
@@ -111,7 +122,7 @@ router.register<typeof GetAccountTransactionRequestSchema, GetAccountTransaction
       const noteHash = decryptedNote.hash
       const decryptedNoteForOwner = await account.getDecryptedNote(noteHash)
 
-      const owner = !!decryptedNoteForOwner
+      const isOwner = !!decryptedNoteForOwner
       const spent = decryptedNoteForOwner ? decryptedNoteForOwner.spent : false
       const note = decryptedNoteForOwner
         ? decryptedNoteForOwner.note
@@ -120,7 +131,8 @@ router.register<typeof GetAccountTransactionRequestSchema, GetAccountTransaction
       const asset = await node.chain.getAssetById(note.assetId())
 
       serializedNotes.push({
-        owner,
+        isOwner,
+        owner: note.owner(),
         memo: note.memo(),
         value: CurrencyUtils.encode(note.value()),
         assetId: note.assetId().toString('hex'),
@@ -132,11 +144,17 @@ router.register<typeof GetAccountTransactionRequestSchema, GetAccountTransaction
 
     const serializedTransaction = serializeRpcAccountTransaction(transaction)
 
-    const status = await node.wallet.getTransactionStatus(account, transaction)
+    const assetBalanceDeltas = await getAssetBalanceDeltas(node, transaction)
+
+    const status = await node.wallet.getTransactionStatus(account, transaction, {
+      confirmations: request.data.confirmations,
+    })
+
     const type = await node.wallet.getTransactionType(account, transaction)
 
     const serialized = {
       ...serializedTransaction,
+      assetBalanceDeltas,
       notes: serializedNotes,
       status,
       type,

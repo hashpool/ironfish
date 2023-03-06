@@ -25,17 +25,17 @@ export class SubmitTelemetryRequest extends WorkerMessage {
     bw.writeU64(this.points.length)
 
     for (const point of this.points) {
-      bw.writeVarString(point.measurement)
-      bw.writeVarString(point.timestamp.toISOString())
+      bw.writeVarString(point.measurement, 'utf8')
+      bw.writeVarString(point.timestamp.toISOString(), 'utf8')
 
       const { fields } = point
       bw.writeU64(fields.length)
       for (const field of fields) {
-        bw.writeVarString(field.name)
-        bw.writeVarString(field.type)
+        bw.writeVarString(field.name, 'utf8')
+        bw.writeVarString(field.type, 'utf8')
         switch (field.type) {
           case 'string':
-            bw.writeVarString(field.value)
+            bw.writeVarString(field.value, 'utf8')
             break
           case 'boolean':
             bw.writeU8(Number(field.value))
@@ -53,8 +53,8 @@ export class SubmitTelemetryRequest extends WorkerMessage {
       if (tags) {
         bw.writeU64(tags.length)
         for (const tag of tags) {
-          bw.writeVarString(tag.name)
-          bw.writeVarString(tag.value)
+          bw.writeVarString(tag.name, 'utf8')
+          bw.writeVarString(tag.value, 'utf8')
         }
       }
     }
@@ -67,17 +67,17 @@ export class SubmitTelemetryRequest extends WorkerMessage {
     const pointsLength = reader.readU64()
     const points = []
     for (let i = 0; i < pointsLength; i++) {
-      const measurement = reader.readVarString()
-      const timestamp = new Date(reader.readVarString())
+      const measurement = reader.readVarString('utf8')
+      const timestamp = new Date(reader.readVarString('utf8'))
 
       const fieldsLength = reader.readU64()
       const fields = []
       for (let j = 0; j < fieldsLength; j++) {
-        const name = reader.readVarString()
-        const type = reader.readVarString()
+        const name = reader.readVarString('utf8')
+        const type = reader.readVarString('utf8')
         switch (type) {
           case 'string': {
-            const value = reader.readVarString()
+            const value = reader.readVarString('utf8')
             fields.push({ name, type, value })
             break
           }
@@ -106,8 +106,8 @@ export class SubmitTelemetryRequest extends WorkerMessage {
         const tagsLength = reader.readU64()
         tags = []
         for (let k = 0; k < tagsLength; k++) {
-          const name = reader.readVarString()
-          const value = reader.readVarString()
+          const name = reader.readVarString('utf8')
+          const value = reader.readVarString('utf8')
           tags.push({ name, value })
         }
       }
@@ -120,16 +120,16 @@ export class SubmitTelemetryRequest extends WorkerMessage {
   getSize(): number {
     let size = 8 + bufio.sizeVarBytes(this.graffiti)
     for (const point of this.points) {
-      size += bufio.sizeVarString(point.measurement)
-      size += bufio.sizeVarString(point.timestamp.toISOString())
+      size += bufio.sizeVarString(point.measurement, 'utf8')
+      size += bufio.sizeVarString(point.timestamp.toISOString(), 'utf8')
 
       size += 8
       for (const field of point.fields) {
-        size += bufio.sizeVarString(field.name)
-        size += bufio.sizeVarString(field.type)
+        size += bufio.sizeVarString(field.name, 'utf8')
+        size += bufio.sizeVarString(field.type, 'utf8')
         switch (field.type) {
           case 'string':
-            size += bufio.sizeVarString(field.value)
+            size += bufio.sizeVarString(field.value, 'utf8')
             break
           case 'boolean':
             size += 1
@@ -145,8 +145,8 @@ export class SubmitTelemetryRequest extends WorkerMessage {
       if (tags) {
         size += 8
         for (const tag of tags) {
-          size += bufio.sizeVarString(tag.name)
-          size += bufio.sizeVarString(tag.value)
+          size += bufio.sizeVarString(tag.name, 'utf8')
+          size += bufio.sizeVarString(tag.value, 'utf8')
         }
       }
     }

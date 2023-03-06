@@ -14,6 +14,7 @@ import { displayNetworkMessageType, NetworkMessage } from '../messages/networkMe
 import { NetworkMessageType } from '../types'
 import { NetworkError, WebRtcConnection, WebSocketConnection } from './connections'
 import { Connection, ConnectionType } from './connections/connection'
+import { Features } from './peerFeatures'
 
 export enum BAN_SCORE {
   NO = 0,
@@ -137,6 +138,11 @@ export class Peer {
   genesisBlockHash: Buffer | null = null
 
   /**
+   * Features supported by the peer
+   */
+  features: Features | null = null
+
+  /**
    * The loggable name of the peer. For a more specific value,
    * try Peer.name or Peer.state.identity.
    */
@@ -171,6 +177,11 @@ export class Peer {
   /** how many outbound connections does the peer have */
   pendingRPC = 0
 
+  /**
+   * True if the peer is a known honest peer.
+   */
+  isWhitelisted = false
+
   shouldLogMessages = false
 
   loggedMessages: Array<LoggedMessage> = []
@@ -194,7 +205,7 @@ export class Peer {
   /**
    * Fired when the peer should be banned
    */
-  readonly onBanned: Event<[]> = new Event()
+  readonly onBanned: Event<[string]> = new Event()
 
   /**
    * Event fired when the peer changes state. The event may fire when connections change, even if the
@@ -704,7 +715,7 @@ export class Peer {
     }
 
     this.logger.info(`Peer ${this.displayName} has been banned: ${reason || 'UNKNOWN'}`)
-    this.onBanned.emit()
+    this.onBanned.emit(reason || 'UNKNOWN')
     this.close(new Error(`BANNED: ${reason || 'UNKNOWN'}`))
     return true
   }

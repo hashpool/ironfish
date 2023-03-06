@@ -1,12 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-import {
-  Asset,
-  generateKey,
-  generateKeyFromPrivateKey,
-  Note as NativeNote,
-} from '@ironfish/rust-nodejs'
+import { Asset, generateKey, Note as NativeNote } from '@ironfish/rust-nodejs'
 import { BufferMap } from 'buffer-map'
 import { v4 as uuid } from 'uuid'
 import { Assert } from '../assert'
@@ -17,14 +12,14 @@ import { Event } from '../event'
 import { Config } from '../fileStores'
 import { createRootLogger, Logger } from '../logger'
 import { MemPool } from '../memPool'
+import { getFee } from '../memPool/feeEstimator'
 import { NoteHasher } from '../merkletree/hasher'
 import { NoteWitness, Witness } from '../merkletree/witness'
 import { Mutex } from '../mutex'
 import { BlockHeader } from '../primitives/blockheader'
 import { BurnDescription } from '../primitives/burnDescription'
-import { MintDescription } from '../primitives/mintDescription'
 import { Note } from '../primitives/note'
-import { RawTransaction } from '../primitives/rawTransaction'
+import { MintData, RawTransaction } from '../primitives/rawTransaction'
 import { Transaction } from '../primitives/transaction'
 import { IDatabaseTransaction } from '../storage/database/transaction'
 import {
@@ -36,16 +31,25 @@ import {
 } from '../utils'
 import { WorkerPool } from '../workerPool'
 import { DecryptedNote, DecryptNoteOptions } from '../workerPool/tasks/decryptNotes'
-import { Account, AccountImport } from './account'
+import { Account, ACCOUNT_SCHEMA_VERSION } from './account'
+import { AssetBalances } from './assetBalances'
 import { NotEnoughFundsError } from './errors'
 import { MintAssetOptions } from './interfaces/mintAssetOptions'
 import { validateAccount } from './validator'
 import { AccountValue } from './walletdb/accountValue'
+import { AssetValue } from './walletdb/assetValue'
 import { DecryptedNoteValue } from './walletdb/decryptedNoteValue'
 import { TransactionValue } from './walletdb/transactionValue'
 import { WalletDB } from './walletdb/walletdb'
 
 const noteHasher = new NoteHasher()
+
+export enum AssetStatus {
+  CONFIRMED = 'confirmed',
+  PENDING = 'pending',
+  UNCONFIRMED = 'unconfirmed',
+  UNKNOWN = 'unknown',
+}
 
 export enum TransactionStatus {
   CONFIRMED = 'confirmed',
@@ -76,6 +80,7 @@ export class Wallet {
   readonly workerPool: WorkerPool
   readonly chain: Blockchain
   readonly chainProcessor: ChainProcessor
+  readonly memPool: MemPool
   private readonly config: Config
 
   protected rebroadcastAfter: number
@@ -91,6 +96,7 @@ export class Wallet {
   constructor({
     chain,
     config,
+    memPool,
     database,
     logger = createRootLogger(),
     rebroadcastAfter,
@@ -99,6 +105,7 @@ export class Wallet {
     chain: Blockchain
     config: Config
     database: WalletDB
+    memPool: MemPool
     logger?: Logger
     rebroadcastAfter?: number
     workerPool: WorkerPool
@@ -106,6 +113,7 @@ export class Wallet {
     this.chain = chain
     this.config = config
     this.logger = logger.withTag('accounts')
+    this.memPool = memPool
     this.walletDb = database
     this.workerPool = workerPool
     this.rebroadcastAfter = rebroadcastAfter ?? 10
@@ -286,14 +294,15 @@ export class Wallet {
   }
 
   private async resetAccounts(tx?: IDatabaseTransaction): Promise<void> {
-    for (const account of this.accounts.values()) {
-      await account.reset(tx)
+    for (const account of this.listAccounts()) {
+      await this.resetAccount(account, tx)
     }
   }
 
   async decryptNotes(
     transaction: Transaction,
     initialNoteIndex: number | null,
+    decryptForSpender: boolean,
     accounts?: Array<Account>,
   ): Promise<Map<string, Array<DecryptedNote>>> {
     const accountsToCheck =
@@ -316,8 +325,9 @@ export class Wallet {
           serializedNote: note.serialize(),
           incomingViewKey: account.incomingViewKey,
           outgoingViewKey: account.outgoingViewKey,
-          spendingKey: account.spendingKey,
+          viewKey: account.viewKey,
           currentNoteIndex,
+          decryptForSpender,
         })
 
         if (currentNoteIndex) {
@@ -372,6 +382,8 @@ export class Wallet {
     })
 
     for (const account of accounts) {
+      const assetBalanceDeltas = new AssetBalances()
+
       await this.walletDb.db.transaction(async (tx) => {
         const transactions = await this.chain.getBlockTransactions(blockHeader)
 
@@ -385,22 +397,70 @@ export class Wallet {
           const decryptedNotesByAccountId = await this.decryptNotes(
             transaction,
             initialNoteIndex,
+            false,
             [account],
           )
 
-          const decryptedNotes = decryptedNotesByAccountId.get(account.id)
+          const decryptedNotes = decryptedNotesByAccountId.get(account.id) ?? []
 
-          if (!decryptedNotes) {
+          if (decryptedNotes.length === 0 && !(await account.hasSpend(transaction))) {
             continue
           }
 
-          await account.connectTransaction(blockHeader, transaction, decryptedNotes, tx)
+          const transactionDeltas = await account.connectTransaction(
+            blockHeader,
+            transaction,
+            decryptedNotes,
+            tx,
+          )
 
+          assetBalanceDeltas.update(transactionDeltas)
+
+          await this.upsertAssetsFromDecryptedNotes(account, decryptedNotes, blockHeader, tx)
           scan?.signal(blockHeader.sequence)
         }
 
+        await account.updateUnconfirmedBalances(
+          assetBalanceDeltas,
+          blockHeader.hash,
+          blockHeader.sequence,
+          tx,
+        )
+
         await account.updateHead({ hash: blockHeader.hash, sequence: blockHeader.sequence }, tx)
       })
+    }
+  }
+
+  private async upsertAssetsFromDecryptedNotes(
+    account: Account,
+    decryptedNotes: DecryptedNote[],
+    blockHeader?: BlockHeader,
+    tx?: IDatabaseTransaction,
+  ): Promise<void> {
+    for (const { serializedNote } of decryptedNotes) {
+      const note = new Note(serializedNote)
+      const asset = await this.walletDb.getAsset(account, note.assetId(), tx)
+
+      if (!asset) {
+        const chainAsset = await this.chain.getAssetById(note.assetId())
+        Assert.isNotNull(chainAsset, 'Asset must be non-null in the chain')
+        await account.saveAssetFromChain(
+          chainAsset.createdTransactionHash,
+          chainAsset.id,
+          chainAsset.metadata,
+          chainAsset.name,
+          chainAsset.owner,
+          blockHeader,
+          tx,
+        )
+      } else if (blockHeader) {
+        await account.updateAssetWithBlockHeader(
+          asset,
+          { hash: blockHeader.hash, sequence: blockHeader.sequence },
+          tx,
+        )
+      }
     }
   }
 
@@ -412,16 +472,27 @@ export class Wallet {
     })
 
     for (const account of accounts) {
+      const assetBalanceDeltas = new AssetBalances()
+
       await this.walletDb.db.transaction(async (tx) => {
         const transactions = await this.chain.getBlockTransactions(header)
 
         for (const { transaction } of transactions.slice().reverse()) {
-          await account.disconnectTransaction(header, transaction, tx)
+          const transactionDeltas = await account.disconnectTransaction(header, transaction, tx)
+
+          assetBalanceDeltas.update(transactionDeltas)
 
           if (transaction.isMinersFee()) {
             await account.deleteTransaction(transaction, tx)
           }
         }
+
+        await account.updateUnconfirmedBalances(
+          assetBalanceDeltas,
+          header.previousBlockHash,
+          header.sequence - 1,
+          tx,
+        )
 
         await account.updateHead(
           { hash: header.previousBlockHash, sequence: header.sequence - 1 },
@@ -441,16 +512,22 @@ export class Wallet {
       return
     }
 
-    const decryptedNotesByAccountId = await this.decryptNotes(transaction, null, accounts)
+    const decryptedNotesByAccountId = await this.decryptNotes(
+      transaction,
+      null,
+      false,
+      accounts,
+    )
 
-    for (const [accountId, decryptedNotes] of decryptedNotesByAccountId) {
-      const account = this.accounts.get(accountId)
+    for (const account of accounts) {
+      const decryptedNotes = decryptedNotesByAccountId.get(account.id) ?? []
 
-      if (!account) {
+      if (decryptedNotes.length === 0 && !(await account.hasSpend(transaction))) {
         continue
       }
 
       await account.addPendingTransaction(transaction, decryptedNotes, this.chain.head.sequence)
+      await this.upsertAssetsFromDecryptedNotes(account, decryptedNotes)
     }
   }
 
@@ -537,7 +614,10 @@ export class Wallet {
     assetId: Buffer
     unconfirmed: bigint
     unconfirmedCount: number
+    pending: bigint
+    pendingCount: number
     confirmed: bigint
+    available: bigint
     blockHash: Buffer | null
     sequence: number | null
   }> {
@@ -558,6 +638,9 @@ export class Wallet {
     unconfirmedCount: number
     unconfirmed: bigint
     confirmed: bigint
+    pendingCount: number
+    pending: bigint
+    available: bigint
     blockHash: Buffer | null
     sequence: number | null
   }> {
@@ -585,9 +668,8 @@ export class Wallet {
   }
 
   async send(
-    memPool: MemPool,
-    sender: Account,
-    receives: {
+    account: Account,
+    outputs: {
       publicAddress: string
       amount: bigint
       memo: string
@@ -596,139 +678,182 @@ export class Wallet {
     fee: bigint,
     expirationDelta: number,
     expiration?: number | null,
+    confirmations?: number | null,
   ): Promise<Transaction> {
-    const raw = await this.createTransaction(
-      sender,
-      receives,
-      [],
-      [],
+    const raw = await this.createTransaction({
+      account,
+      outputs,
       fee,
       expirationDelta,
-      expiration,
-    )
+      expiration: expiration ?? undefined,
+      confirmations: confirmations ?? undefined,
+    })
 
-    return this.postTransaction(raw, memPool)
+    return this.post({
+      transaction: raw,
+      account,
+    })
   }
 
-  async mint(
-    memPool: MemPool,
-    account: Account,
-    options: MintAssetOptions,
-  ): Promise<Transaction> {
-    let asset: Asset
+  async mint(account: Account, options: MintAssetOptions): Promise<Transaction> {
+    let mintData: MintData
+
     if ('assetId' in options) {
-      const record = await this.chain.getAssetById(options.assetId)
-      if (!record) {
+      const asset = await this.chain.getAssetById(options.assetId)
+      if (!asset) {
         throw new Error(
           `Asset not found. Cannot mint for identifier '${options.assetId.toString('hex')}'`,
         )
       }
 
-      asset = new Asset(
-        account.spendingKey,
-        record.name.toString('utf8'),
-        record.metadata.toString('utf8'),
-      )
-      // Verify the stored asset produces the same identfier before building a transaction
-      if (!options.assetId.equals(asset.id())) {
-        throw new Error(`Unauthorized to mint for asset '${options.assetId.toString('hex')}'`)
+      mintData = {
+        name: asset.name.toString('utf8'),
+        metadata: asset.metadata.toString('utf8'),
+        value: options.value,
       }
     } else {
-      asset = new Asset(account.spendingKey, options.name, options.metadata)
+      mintData = {
+        name: options.name,
+        metadata: options.metadata,
+        value: options.value,
+      }
     }
 
-    const raw = await this.createTransaction(
+    const raw = await this.createTransaction({
       account,
-      [],
-      [{ asset, value: options.value }],
-      [],
-      options.fee,
-      options.expirationDelta,
-      options.expiration,
-    )
+      mints: [mintData],
+      fee: options.fee,
+      expirationDelta: options.expirationDelta,
+      expiration: options.expiration,
+      confirmations: options.confirmations,
+    })
 
-    return this.postTransaction(raw, memPool)
+    return this.post({
+      transaction: raw,
+      account,
+    })
   }
 
   async burn(
-    memPool: MemPool,
     account: Account,
     assetId: Buffer,
     value: bigint,
     fee: bigint,
     expirationDelta: number,
     expiration?: number,
+    confirmations?: number,
   ): Promise<Transaction> {
-    const raw = await this.createTransaction(
+    const raw = await this.createTransaction({
       account,
-      [],
-      [],
-      [{ assetId, value }],
+      burns: [{ assetId, value }],
       fee,
       expirationDelta,
       expiration,
-    )
+      confirmations,
+    })
 
-    return this.postTransaction(raw, memPool)
+    return this.post({
+      transaction: raw,
+      account,
+    })
   }
 
-  async createTransaction(
-    sender: Account,
-    receives: {
+  async createTransaction(options: {
+    account: Account
+    outputs?: {
       publicAddress: string
       amount: bigint
       memo: string
       assetId: Buffer
-    }[],
-    mints: MintDescription[],
-    burns: BurnDescription[],
-    fee: bigint,
-    expirationDelta: number,
-    expiration?: number | null,
-  ): Promise<RawTransaction> {
+    }[]
+    mints?: MintData[]
+    burns?: BurnDescription[]
+    fee?: bigint
+    feeRate?: bigint
+    expiration?: number
+    expirationDelta?: number
+    confirmations?: number
+  }): Promise<RawTransaction> {
     const heaviestHead = this.chain.head
     if (heaviestHead === null) {
       throw new Error('You must have a genesis block to create a transaction')
     }
 
-    expiration = expiration ?? heaviestHead.sequence + expirationDelta
+    if (options.fee === undefined && options.feeRate === undefined) {
+      throw new Error('Fee or FeeRate is required to create a transaction')
+    }
+
+    const confirmations = options.confirmations ?? this.config.get('confirmations')
+
+    const expirationDelta =
+      options.expirationDelta ?? this.config.get('transactionExpirationDelta')
+
+    const expiration = options.expiration ?? heaviestHead.sequence + expirationDelta
 
     if (isExpiredSequence(expiration, this.chain.head.sequence)) {
-      throw new Error('Invalid expiration sequence for transaction')
+      throw new Error(
+        `Invalid expiration sequence for transaction ${expiration} vs ${this.chain.head.sequence}`,
+      )
     }
 
     const unlock = await this.createTransactionMutex.lock()
 
     try {
-      this.assertHasAccount(sender)
+      this.assertHasAccount(options.account)
 
-      if (!(await this.isAccountUpToDate(sender))) {
+      if (!(await this.isAccountUpToDate(options.account))) {
         throw new Error('Your account must finish scanning before sending a transaction.')
       }
 
       const raw = new RawTransaction()
-      raw.spendingKey = sender.spendingKey
       raw.expiration = expiration
-      raw.mints = mints
-      raw.burns = burns
-      raw.fee = fee
 
-      for (const receive of receives) {
-        const note = new NativeNote(
-          receive.publicAddress,
-          receive.amount,
-          receive.memo,
-          receive.assetId,
-          sender.publicAddress,
-        )
+      if (options.mints) {
+        raw.mints = options.mints
+      }
 
-        raw.receives.push({ note: new Note(note.serialize()) })
+      if (options.burns) {
+        raw.burns = options.burns
+      }
+
+      if (options.outputs) {
+        for (const output of options.outputs) {
+          const note = new NativeNote(
+            output.publicAddress,
+            output.amount,
+            output.memo,
+            output.assetId,
+            options.account.publicAddress,
+          )
+
+          raw.outputs.push({ note: new Note(note.serialize()) })
+        }
+      }
+
+      if (options.fee != null) {
+        raw.fee = options.fee
+      }
+
+      if (options.feeRate) {
+        raw.fee = getFee(options.feeRate, raw.size())
       }
 
       await this.fund(raw, {
-        fee: fee,
-        account: sender,
+        fee: raw.fee,
+        account: options.account,
+        confirmations: confirmations,
       })
+
+      if (options.feeRate) {
+        raw.fee = getFee(options.feeRate, raw.size())
+        raw.spends = []
+
+        await this.fund(raw, {
+          fee: raw.fee,
+          account: options.account,
+          confirmations: confirmations,
+        })
+      }
 
       return raw
     } finally {
@@ -736,18 +861,30 @@ export class Wallet {
     }
   }
 
-  async postTransaction(raw: RawTransaction, memPool: MemPool): Promise<Transaction> {
-    const transaction = await this.workerPool.postTransaction(raw)
+  async post(options: {
+    transaction: RawTransaction
+    spendingKey?: string
+    account?: Account
+    broadcast?: boolean
+  }): Promise<Transaction> {
+    const broadcast = options.broadcast ?? true
+
+    const spendingKey = options.account?.spendingKey ?? options.spendingKey
+    Assert.isTruthy(spendingKey, `Spending key is required to post transaction`)
+
+    const transaction = await this.workerPool.postTransaction(options.transaction, spendingKey)
 
     const verify = this.chain.verifier.verifyCreatedTransaction(transaction)
     if (!verify.valid) {
       throw new Error(`Invalid transaction, reason: ${String(verify.reason)}`)
     }
 
-    await this.addPendingTransaction(transaction)
-    memPool.acceptTransaction(transaction)
-    this.broadcastTransaction(transaction)
-    this.onTransactionCreated.emit(transaction)
+    if (broadcast) {
+      await this.addPendingTransaction(transaction)
+      this.memPool.acceptTransaction(transaction)
+      this.broadcastTransaction(transaction)
+      this.onTransactionCreated.emit(transaction)
+    }
 
     return transaction
   }
@@ -757,13 +894,14 @@ export class Wallet {
     options: {
       fee: bigint
       account: Account
+      confirmations: number
     },
   ): Promise<void> {
     const needed = this.buildAmountsNeeded(raw, {
       fee: options.fee,
     })
 
-    const spends = await this.createSpends(options.account, needed)
+    const spends = await this.createSpends(options.account, needed, options.confirmations)
 
     for (const spend of spends) {
       const witness = new Witness(
@@ -789,9 +927,9 @@ export class Wallet {
     const amountsNeeded = new BufferMap<bigint>()
     amountsNeeded.set(Asset.nativeId(), options.fee)
 
-    for (const receive of raw.receives) {
-      const currentAmount = amountsNeeded.get(receive.note.assetId()) ?? BigInt(0)
-      amountsNeeded.set(receive.note.assetId(), currentAmount + receive.note.value())
+    for (const output of raw.outputs) {
+      const currentAmount = amountsNeeded.get(output.note.assetId()) ?? BigInt(0)
+      amountsNeeded.set(output.note.assetId(), currentAmount + output.note.value())
     }
 
     for (const burn of raw.burns) {
@@ -805,11 +943,17 @@ export class Wallet {
   private async createSpends(
     sender: Account,
     amountsNeeded: BufferMap<bigint>,
+    confirmations: number,
   ): Promise<Array<{ note: Note; witness: NoteWitness }>> {
     const notesToSpend: Array<{ note: Note; witness: NoteWitness }> = []
 
     for (const [assetId, amountNeeded] of amountsNeeded.entries()) {
-      const { amount, notes } = await this.createSpendsForAsset(sender, assetId, amountNeeded)
+      const { amount, notes } = await this.createSpendsForAsset(
+        sender,
+        assetId,
+        amountNeeded,
+        confirmations,
+      )
 
       if (amount < amountNeeded) {
         throw new NotEnoughFundsError(assetId, amount, amountNeeded)
@@ -825,9 +969,15 @@ export class Wallet {
     sender: Account,
     assetId: Buffer,
     amountNeeded: bigint,
+    confirmations: number,
   ): Promise<{ amount: bigint; notes: Array<{ note: Note; witness: NoteWitness }> }> {
     let amount = BigInt(0)
     const notes: Array<{ note: Note; witness: NoteWitness }> = []
+
+    const head = await sender.getHead()
+    if (!head) {
+      return { amount, notes }
+    }
 
     for await (const unspentNote of this.getUnspentNotes(sender, assetId)) {
       if (unspentNote.note.value() <= BigInt(0)) {
@@ -836,6 +986,12 @@ export class Wallet {
 
       Assert.isNotNull(unspentNote.index)
       Assert.isNotNull(unspentNote.nullifier)
+      Assert.isNotNull(unspentNote.sequence)
+
+      const isConfirmed = head.sequence - unspentNote.sequence >= confirmations
+      if (!isConfirmed) {
+        continue
+      }
 
       if (await this.checkNoteOnChainAndRepair(sender, unspentNote)) {
         continue
@@ -871,7 +1027,7 @@ export class Wallet {
    * Checks if a note is already on the chain when trying to spend it
    *
    * This function should be deleted once the wallet is detached from the chain,
-   * either way. It shouldn't be neccessary. It's just a hold over function to
+   * either way. It shouldn't be necessary. It's just a hold over function to
    * sanity check from wallet 1.0.
    *
    * @returns true if the note is on the chain already
@@ -1056,6 +1212,29 @@ export class Wallet {
     }
   }
 
+  async getAssetStatus(
+    account: Account,
+    assetValue: AssetValue,
+    options?: {
+      headSequence?: number | null
+      confirmations?: number
+    },
+  ): Promise<AssetStatus> {
+    const confirmations = options?.confirmations ?? this.config.get('confirmations')
+
+    const headSequence = options?.headSequence ?? (await account.getHead())?.sequence
+    if (!headSequence) {
+      return AssetStatus.UNKNOWN
+    }
+
+    if (assetValue.sequence) {
+      const confirmed = headSequence - assetValue.sequence >= confirmations
+      return confirmed ? AssetStatus.CONFIRMED : AssetStatus.UNCONFIRMED
+    }
+
+    return AssetStatus.PENDING
+  }
+
   async getTransactionType(
     account: Account,
     transaction: TransactionValue,
@@ -1068,7 +1247,7 @@ export class Wallet {
     let send = false
 
     for (const spend of transaction.transaction.spends) {
-      if ((await account.getNoteHash(spend.nullifier, tx)) !== null) {
+      if ((await account.getNoteHash(spend.nullifier, tx)) !== undefined) {
         send = true
         break
       }
@@ -1085,12 +1264,14 @@ export class Wallet {
     const key = generateKey()
 
     const account = new Account({
+      version: ACCOUNT_SCHEMA_VERSION,
       id: uuid(),
       name,
-      incomingViewKey: key.incoming_view_key,
-      outgoingViewKey: key.outgoing_view_key,
-      publicAddress: key.public_address,
-      spendingKey: key.spending_key,
+      incomingViewKey: key.incomingViewKey,
+      outgoingViewKey: key.outgoingViewKey,
+      publicAddress: key.publicAddress,
+      spendingKey: key.spendingKey,
+      viewKey: key.viewKey,
       walletDb: this.walletDb,
     })
 
@@ -1119,23 +1300,19 @@ export class Wallet {
     }
   }
 
-  async importAccount(toImport: AccountImport): Promise<Account> {
-    if (toImport.name && this.getAccountByName(toImport.name)) {
-      throw new Error(`Account already exists with the name ${toImport.name}`)
+  async importAccount(accountValue: AccountValue): Promise<Account> {
+    if (accountValue.name && this.getAccountByName(accountValue.name)) {
+      throw new Error(`Account already exists with the name ${accountValue.name}`)
     }
-
-    if (this.listAccounts().find((a) => toImport.spendingKey === a.spendingKey)) {
+    const accounts = this.listAccounts()
+    if (
+      accountValue.spendingKey &&
+      accounts.find((a) => accountValue.spendingKey === a.spendingKey)
+    ) {
       throw new Error(`Account already exists with provided spending key`)
     }
-
-    const key = generateKeyFromPrivateKey(toImport.spendingKey)
-
-    const accountValue: AccountValue = {
-      ...toImport,
-      id: uuid(),
-      incomingViewKey: key.incoming_view_key,
-      outgoingViewKey: key.outgoing_view_key,
-      publicAddress: key.public_address,
+    if (accounts.find((a) => accountValue.viewKey === a.viewKey)) {
+      throw new Error(`Account already exists with provided view key(s)`)
     }
 
     validateAccount(accountValue)
@@ -1164,13 +1341,39 @@ export class Wallet {
     return this.getAccountByName(name) !== null
   }
 
-  async removeAccount(name: string): Promise<void> {
+  async resetAccount(account: Account, tx?: IDatabaseTransaction): Promise<void> {
+    const newAccount = new Account({
+      ...account,
+      id: uuid(),
+      walletDb: this.walletDb,
+    })
+
+    await this.walletDb.db.withTransaction(tx, async (tx) => {
+      await this.walletDb.setAccount(newAccount, tx)
+      await newAccount.updateHead(null, tx)
+
+      if (account.id === this.defaultAccount) {
+        await this.walletDb.setDefaultAccount(newAccount.id, tx)
+        this.defaultAccount = newAccount.id
+      }
+
+      this.accounts.set(newAccount.id, newAccount)
+
+      await this.removeAccount(account, tx)
+    })
+  }
+
+  async removeAccountByName(name: string): Promise<void> {
     const account = this.getAccountByName(name)
     if (!account) {
       return
     }
 
-    await this.walletDb.db.transaction(async (tx) => {
+    await this.removeAccount(account)
+  }
+
+  async removeAccount(account: Account, tx?: IDatabaseTransaction): Promise<void> {
+    await this.walletDb.db.withTransaction(tx, async (tx) => {
       if (account.id === this.defaultAccount) {
         await this.walletDb.setDefaultAccount(null, tx)
         this.defaultAccount = null

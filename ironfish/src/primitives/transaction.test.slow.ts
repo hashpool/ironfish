@@ -65,9 +65,9 @@ describe('Accounts', () => {
     headhash[0] = 0
     await accountA.updateHead({ hash: headhash, sequence: 2 })
 
-    const response = nodeA.wallet.createTransaction(
-      accountA,
-      [
+    const response = nodeA.wallet.createTransaction({
+      account: accountA,
+      outputs: [
         {
           publicAddress: accountB.publicAddress,
           amount: BigInt(1),
@@ -75,12 +75,9 @@ describe('Accounts', () => {
           assetId: Asset.nativeId(),
         },
       ],
-      [],
-      [],
-      BigInt(1),
-      0,
-      0,
-    )
+      fee: 1n,
+      expiration: 0,
+    })
     await expect(response).rejects.toThrow(Error)
   })
 
@@ -88,21 +85,17 @@ describe('Accounts', () => {
     const nodeA = nodeTest.node
 
     // Create an account A
-    const accountA = await useAccountFixture(nodeA.wallet, () =>
-      nodeA.wallet.createAccount('testA'),
-    )
-    const accountB = await useAccountFixture(nodeA.wallet, () =>
-      nodeA.wallet.createAccount('testB'),
-    )
+    const accountA = await useAccountFixture(nodeTest.node.wallet, 'testA')
+    const accountB = await useAccountFixture(nodeTest.node.wallet, 'testB')
 
     // Create a block with a miner's fee
     const block1 = await useMinerBlockFixture(nodeA.chain, 2, accountA)
     await nodeA.chain.addBlock(block1)
     await nodeA.wallet.updateHead()
 
-    const raw = await nodeA.wallet.createTransaction(
-      accountA,
-      [
+    const raw = await nodeA.wallet.createTransaction({
+      account: accountA,
+      outputs: [
         {
           publicAddress: accountB.publicAddress,
           amount: BigInt(1),
@@ -110,14 +103,14 @@ describe('Accounts', () => {
           assetId: Asset.nativeId(),
         },
       ],
-      [],
-      [],
-      BigInt(1),
-      0,
-      0,
-    )
+      fee: 1n,
+      expiration: 0,
+    })
 
-    const transaction = await nodeA.wallet.postTransaction(raw, nodeA.memPool)
+    const transaction = await nodeA.wallet.post({
+      transaction: raw,
+      account: accountA,
+    })
 
     expect(transaction.isMinersFee()).toBe(false)
   })

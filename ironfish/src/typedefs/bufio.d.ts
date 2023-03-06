@@ -20,8 +20,8 @@ declare module 'bufio' {
     writeBigU256(value: bigint): StaticWriter
     writeBigU256BE(value: bigint): StaticWriter
     writeVarint(value: number): StaticWriter
-    writeString(value: string, enc?: BufferEncoding | null): StaticWriter
-    writeVarString(value: string, enc?: BufferEncoding | null): StaticWriter
+    writeString(value: string, enc: BufferEncoding | null): StaticWriter
+    writeVarString(value: string, enc: BufferEncoding | null): StaticWriter
     writeVarBytes(value: Buffer): StaticWriter
     writeBytes(value: Buffer): StaticWriter
     writeHash(value: Buffer | string): StaticWriter
@@ -46,8 +46,8 @@ declare module 'bufio' {
     writeI64(value: number): BufferWriter
     writeBigI64(value: bigint): BufferWriter
     writeVarint(value: number): BufferWriter
-    writeString(value: string, enc?: BufferEncoding | null): BufferWriter
-    writeVarString(value: string, enc?: BufferEncoding | null): BufferWriter
+    writeString(value: string, enc: BufferEncoding | null): BufferWriter
+    writeVarString(value: string, enc: BufferEncoding | null): BufferWriter
     writeVarBytes(value: Buffer): BufferWriter
     writeBytes(value: Buffer): BufferWriter
     writeHash(value: Buffer | string): BufferWriter
@@ -77,8 +77,8 @@ declare module 'bufio' {
     readDoubleBE(): number
     readDouble(): number
     readVarint(): number
-    readString(size: number, enc?: BufferEncoding | null): string
-    readVarString(enc?: BufferEncoding | null, limit?: number): string
+    readString(size: number, enc: BufferEncoding | null): string
+    readVarString(enc: BufferEncoding | null, limit?: number): string
     readBytes(size: number, zeroCopy?: boolean): Buffer
     readVarBytes(): Buffer
 
@@ -91,5 +91,5 @@ declare module 'bufio' {
 
   export function sizeVarint(value: number): number
   export function sizeVarBytes(value: Buffer): number
-  export function sizeVarString(value: string, enc?: BufferEncoding): number
+  export function sizeVarString(value: string, enc: BufferEncoding): number
 }

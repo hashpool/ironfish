@@ -18,6 +18,9 @@ export type GetBalanceResponse = {
   confirmed: string
   unconfirmed: string
   unconfirmedCount: number
+  pending: string
+  pendingCount: number
+  available: string
   confirmations: number
   blockHash: string | null
   sequence: number | null
@@ -37,7 +40,10 @@ export const GetBalanceResponseSchema: yup.ObjectSchema<GetBalanceResponse> = yu
     assetId: yup.string().defined(),
     unconfirmed: yup.string().defined(),
     unconfirmedCount: yup.number().defined(),
+    pending: yup.string().defined(),
+    pendingCount: yup.number().defined(),
     confirmed: yup.string().defined(),
+    available: yup.string().defined(),
     confirmations: yup.number().defined(),
     blockHash: yup.string().nullable(true).defined(),
     sequence: yup.number().nullable(true).defined(),
@@ -67,6 +73,9 @@ router.register<typeof GetBalanceRequestSchema, GetBalanceResponse>(
       confirmed: balance.confirmed.toString(),
       unconfirmed: balance.unconfirmed.toString(),
       unconfirmedCount: balance.unconfirmedCount,
+      pending: balance.pending.toString(),
+      available: balance.available.toString(),
+      pendingCount: balance.pendingCount,
       confirmations: confirmations,
       blockHash: balance.blockHash?.toString('hex') ?? null,
       sequence: balance.sequence,

@@ -5,7 +5,7 @@ import { Asset, generateKey } from '@ironfish/rust-nodejs'
 import { BlockSerde, SerializedBlock } from '../primitives/block'
 import { Target } from '../primitives/target'
 import { IJSON } from '../serde'
-import { createNodeTest } from '../testUtilities'
+import { createNodeTest, useAccountFixture } from '../testUtilities'
 import { acceptsAllTarget } from '../testUtilities/helpers/blockchain'
 import { GenesisBlockInfo, makeGenesisBlock } from './makeGenesisBlock'
 
@@ -31,7 +31,7 @@ describe('Read genesis block', () => {
     const minersfee = await nodeTest.strategy.createMinersFee(
       BigInt(0),
       nodeTest.chain.head.sequence + 1,
-      generateKey().spending_key,
+      generateKey().spendingKey,
     )
     const newBlock = await nodeTest.chain.newBlock([], minersfee)
     expect(newBlock).toBeTruthy()
@@ -63,7 +63,7 @@ describe('Create genesis block', () => {
     const amountBigint = BigInt(amountNumber)
 
     // Construct parameters for the genesis block
-    const account = await node.wallet.createAccount('test', true)
+    const account = await useAccountFixture(node.wallet, 'test')
     const info: GenesisBlockInfo = {
       timestamp: Date.now(),
       target: Target.maxTarget(),
@@ -106,7 +106,7 @@ describe('Create genesis block', () => {
     const minersfee = await strategy.createMinersFee(
       BigInt(0),
       block.header.sequence + 1,
-      generateKey().spending_key,
+      generateKey().spendingKey,
     )
     const additionalBlock = await chain.newBlock([], minersfee)
     expect(additionalBlock).toBeTruthy()
@@ -144,7 +144,7 @@ describe('Create genesis block', () => {
     const newMinersfee = await strategy.createMinersFee(
       BigInt(0),
       deserializedBlock.header.sequence + 1,
-      generateKey().spending_key,
+      generateKey().spendingKey,
     )
     const newBlock = await newChain.newBlock([], newMinersfee)
     expect(newBlock).toBeTruthy()

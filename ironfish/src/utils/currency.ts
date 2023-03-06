@@ -4,6 +4,7 @@
 
 import { formatFixed, parseFixed } from '@ethersproject/bignumber'
 import { isNativeIdentifier } from './asset'
+import { BigIntUtils } from './bigint'
 import { FixedNumberUtils } from './fixedNumber'
 
 export class CurrencyUtils {
@@ -17,7 +18,7 @@ export class CurrencyUtils {
   }
 
   /**
-   * Parses iron as ore
+   * Parses iron into ore
    */
   static decodeIron(amount: string | number): bigint {
     return parseFixed(amount.toString(), 8).toBigInt()
@@ -28,6 +29,10 @@ export class CurrencyUtils {
    */
   static decode(amount: string): bigint {
     return BigInt(amount)
+  }
+
+  static decodeTry(amount: string): [bigint, null] | [null, Error] {
+    return BigIntUtils.tryParse(amount)
   }
 
   /**

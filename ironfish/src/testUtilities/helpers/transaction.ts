@@ -4,8 +4,7 @@
 
 import { Asset } from '@ironfish/rust-nodejs'
 import { BurnDescription } from '../../primitives/burnDescription'
-import { MintDescription } from '../../primitives/mintDescription'
-import { RawTransaction } from '../../primitives/rawTransaction'
+import { MintData, RawTransaction } from '../../primitives/rawTransaction'
 import { Transaction } from '../../primitives/transaction'
 import { Account, Wallet } from '../../wallet'
 
@@ -33,19 +32,19 @@ export async function createRawTransaction(options: {
   amount?: bigint
   expiration?: number
   assetId?: Buffer
-  receives?: {
+  outputs?: {
     publicAddress: string
     amount: bigint
     memo: string
     assetId: Buffer
   }[]
-  mints?: MintDescription[]
+  mints?: MintData[]
   burns?: BurnDescription[]
 }): Promise<RawTransaction> {
-  const receives = options.receives ?? []
+  const outputs = options.outputs ?? []
 
   if (options.to) {
-    receives.push({
+    outputs.push({
       publicAddress: options.to.publicAddress,
       amount: options.amount ?? 1n,
       memo: '',
@@ -53,13 +52,13 @@ export async function createRawTransaction(options: {
     })
   }
 
-  return await options.wallet.createTransaction(
-    options.from,
-    receives,
-    options.mints ?? [],
-    options.burns ?? [],
-    options.fee ?? 0n,
-    0,
-    options.expiration ?? 0,
-  )
+  return await options.wallet.createTransaction({
+    account: options.from,
+    outputs,
+    mints: options.mints,
+    burns: options.burns,
+    fee: options.fee ?? 0n,
+    expiration: options.expiration ?? 0,
+    expirationDelta: 0,
+  })
 }

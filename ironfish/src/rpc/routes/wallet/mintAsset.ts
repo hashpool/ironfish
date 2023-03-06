@@ -3,10 +3,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 import * as yup from 'yup'
 import { Assert } from '../../../assert'
-import { CurrencyUtils } from '../../../utils'
+import { CurrencyUtils, YupUtils } from '../../../utils'
 import { MintAssetOptions } from '../../../wallet/interfaces/mintAssetOptions'
-import { ValidationError } from '../../adapters'
 import { ApiNamespace, router } from '../router'
+import { getAccount } from './utils'
 
 export interface MintAssetRequest {
   account: string
@@ -15,6 +15,7 @@ export interface MintAssetRequest {
   assetId?: string
   expiration?: number
   expirationDelta?: number
+  confirmations?: number
   metadata?: string
   name?: string
 }
@@ -29,11 +30,12 @@ export interface MintAssetResponse {
 export const MintAssetRequestSchema: yup.ObjectSchema<MintAssetRequest> = yup
   .object({
     account: yup.string().required(),
-    fee: yup.string().required(),
-    value: yup.string().required(),
+    fee: YupUtils.currency({ min: 1n }).defined(),
+    value: YupUtils.currency({ min: 1n }).defined(),
     assetId: yup.string().optional(),
     expiration: yup.number().optional(),
     expirationDelta: yup.number().optional(),
+    confirmations: yup.number().optional(),
     metadata: yup.string().optional(),
     name: yup.string().optional(),
   })
@@ -52,20 +54,10 @@ router.register<typeof MintAssetRequestSchema, MintAssetResponse>(
   `${ApiNamespace.wallet}/mintAsset`,
   MintAssetRequestSchema,
   async (request, node): Promise<void> => {
-    const account = node.wallet.getAccountByName(request.data.account)
-    if (!account) {
-      throw new ValidationError(`No account found with name ${request.data.account}`)
-    }
+    const account = getAccount(node, request.data.account)
 
     const fee = CurrencyUtils.decode(request.data.fee)
-    if (fee < 1n) {
-      throw new ValidationError(`Invalid transaction fee, ${fee}`)
-    }
-
     const value = CurrencyUtils.decode(request.data.value)
-    if (value <= 0) {
-      throw new ValidationError('Invalid mint amount')
-    }
 
     const expirationDelta =
       request.data.expirationDelta ?? node.config.get('transactionExpirationDelta')
@@ -78,6 +70,7 @@ router.register<typeof MintAssetRequestSchema, MintAssetResponse>(
         fee,
         expirationDelta,
         value,
+        confirmations: request.data.confirmations,
       }
     } else {
       Assert.isNotUndefined(request.data.name, 'Must provide name or identifier to mint')
@@ -91,17 +84,18 @@ router.register<typeof MintAssetRequestSchema, MintAssetResponse>(
         name: request.data.name,
         expirationDelta,
         value,
+        confirmations: request.data.confirmations,
       }
     }
 
-    const transaction = await node.wallet.mint(node.memPool, account, options)
+    const transaction = await node.wallet.mint(account, options)
     Assert.isEqual(transaction.mints.length, 1)
     const mint = transaction.mints[0]
 
     request.end({
       assetId: mint.asset.id().toString('hex'),
       hash: transaction.hash().toString('hex'),
-      name: mint.asset.name().toString('utf8'),
+      name: mint.asset.name().toString('hex'),
       value: mint.value.toString(),
     })
   },

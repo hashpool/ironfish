@@ -6,7 +6,10 @@ use std::cell::RefCell;
 use std::convert::TryInto;
 
 use ironfish_rust::assets::asset::AssetIdentifier;
-use ironfish_rust::transaction::batch_verify_transactions;
+use ironfish_rust::transaction::{
+    batch_verify_transactions, TRANSACTION_EXPIRATION_SIZE, TRANSACTION_FEE_SIZE,
+    TRANSACTION_PUBLIC_KEY_SIZE, TRANSACTION_SIGNATURE_SIZE,
+};
 use ironfish_rust::{
     MerkleNoteHash, ProposedTransaction, PublicAddress, SaplingKey, Transaction,
     TRANSACTION_VERSION as TX_VERSION,
@@ -32,6 +35,18 @@ pub struct NativeTransactionPosted {
 
 #[napi]
 pub const PROOF_LENGTH: u32 = PROOF_SIZE;
+
+#[napi]
+pub const TRANSACTION_SIGNATURE_LENGTH: u32 = TRANSACTION_SIGNATURE_SIZE as u32;
+
+#[napi]
+pub const TRANSACTION_PUBLIC_KEY_RANDOMNESS_LENGTH: u32 = TRANSACTION_PUBLIC_KEY_SIZE as u32;
+
+#[napi]
+pub const TRANSACTION_EXPIRATION_LENGTH: u32 = TRANSACTION_EXPIRATION_SIZE as u32;
+
+#[napi]
+pub const TRANSACTION_FEE_LENGTH: u32 = TRANSACTION_FEE_SIZE as u32;
 
 #[napi]
 pub const TRANSACTION_VERSION: u8 = TX_VERSION;
@@ -169,7 +184,7 @@ impl NativeTransaction {
 
     /// Create a proof of a new note owned by the recipient in this transaction.
     #[napi]
-    pub fn receive(&mut self, note: &NativeNote) -> Result<()> {
+    pub fn output(&mut self, note: &NativeNote) -> Result<()> {
         self.transaction
             .add_output(note.note.clone())
             .map_err(to_napi_err)?;
@@ -230,6 +245,20 @@ impl NativeTransaction {
         Ok(Buffer::from(vec))
     }
 
+    /// Used to generate invalid miners fee transactions for testing. Call
+    /// post_miners_fee instead in user-facing code.
+    #[napi(js_name = "_postMinersFeeUnchecked")]
+    pub fn _post_miners_fee_unchecked(&mut self) -> Result<Buffer> {
+        let transaction = self
+            .transaction
+            .post_miners_fee_unchecked()
+            .map_err(to_napi_err)?;
+
+        let mut vec: Vec<u8> = vec![];
+        transaction.write(&mut vec).map_err(to_napi_err)?;
+        Ok(Buffer::from(vec))
+    }
+
     /// Post the transaction. This performs a bit of validation, and signs
     /// the spends with a signature that proves the spends are part of this
     /// transaction.
@@ -271,15 +300,16 @@ impl NativeTransaction {
 }
 
 #[napi]
-pub fn verify_transactions(serialized_transactions: Vec<Buffer>) -> bool {
+pub fn verify_transactions(serialized_transactions: Vec<JsBuffer>) -> Result<bool> {
     let mut transactions: Vec<Transaction> = vec![];
 
     for tx_bytes in serialized_transactions {
-        match Transaction::read(&mut tx_bytes.as_ref()) {
+        let buf = tx_bytes.into_value()?;
+        match Transaction::read(buf.as_ref()) {
             Ok(tx) => transactions.push(tx),
-            Err(_) => return false,
+            Err(_) => return Ok(false),
         }
     }
 
-    batch_verify_transactions(transactions.iter()).is_ok()
+    Ok(batch_verify_transactions(transactions.iter()).is_ok())
 }

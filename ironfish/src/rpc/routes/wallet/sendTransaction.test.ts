@@ -9,8 +9,8 @@ import { NotEnoughFundsError } from '../../../wallet/errors'
 import { ERROR_CODES } from '../../adapters'
 
 const TEST_PARAMS = {
-  fromAccountName: 'existingAccount',
-  receives: [
+  account: 'existingAccount',
+  outputs: [
     {
       publicAddress: 'test2',
       amount: BigInt(10).toString(),
@@ -22,8 +22,8 @@ const TEST_PARAMS = {
 }
 
 const TEST_PARAMS_MULTI = {
-  fromAccountName: 'existingAccount',
-  receives: [
+  account: 'existingAccount',
+  outputs: [
     {
       publicAddress: 'test2',
       amount: BigInt(10).toString(),
@@ -51,9 +51,9 @@ describe('Transactions sendTransaction', () => {
     await expect(
       routeTest.client.sendTransaction({
         ...TEST_PARAMS,
-        fromAccountName: 'AccountDoesNotExist',
+        account: 'AccountDoesNotExist',
       }),
-    ).rejects.toThrow('No account found with name AccountDoesNotExist')
+    ).rejects.toThrow('No account with name AccountDoesNotExist')
   })
 
   it('throws if not connected to network', async () => {
@@ -98,14 +98,17 @@ describe('Transactions sendTransaction', () => {
     )
   })
 
-  it('throws if the confirmed balance is too low', async () => {
+  it('throws if the available balance is too low', async () => {
     routeTest.node.peerNetwork['_isReady'] = true
     routeTest.chain.synced = true
 
     jest.spyOn(routeTest.node.wallet, 'getBalance').mockResolvedValueOnce({
       unconfirmed: BigInt(11),
       confirmed: BigInt(0),
+      pending: BigInt(11),
+      available: BigInt(0),
       unconfirmedCount: 0,
+      pendingCount: 0,
       blockHash: null,
       sequence: null,
     })
@@ -123,7 +126,10 @@ describe('Transactions sendTransaction', () => {
     jest.spyOn(routeTest.node.wallet, 'getBalance').mockResolvedValueOnce({
       unconfirmed: BigInt(21),
       confirmed: BigInt(0),
+      pending: BigInt(21),
+      available: BigInt(0),
       unconfirmedCount: 0,
+      pendingCount: 0,
       blockHash: null,
       sequence: null,
     })
@@ -151,7 +157,10 @@ describe('Transactions sendTransaction', () => {
     jest.spyOn(routeTest.node.wallet, 'getBalance').mockResolvedValueOnce({
       unconfirmed: BigInt(11),
       confirmed: BigInt(11),
+      pending: BigInt(11),
+      available: BigInt(11),
       unconfirmedCount: 0,
+      pendingCount: 0,
       blockHash: null,
       sequence: null,
     })
@@ -175,7 +184,10 @@ describe('Transactions sendTransaction', () => {
     jest.spyOn(routeTest.node.wallet, 'getBalance').mockResolvedValueOnce({
       unconfirmed: BigInt(11),
       confirmed: BigInt(11),
+      pending: BigInt(11),
+      available: BigInt(11),
       unconfirmedCount: 0,
+      pendingCount: 0,
       blockHash: null,
       sequence: null,
     })
@@ -195,7 +207,10 @@ describe('Transactions sendTransaction', () => {
     jest.spyOn(routeTest.node.wallet, 'getBalance').mockResolvedValueOnce({
       unconfirmed: BigInt(21),
       confirmed: BigInt(21),
+      pending: BigInt(21),
+      available: BigInt(21),
       unconfirmedCount: 0,
+      pendingCount: 0,
       blockHash: null,
       sequence: null,
     })
@@ -204,7 +219,7 @@ describe('Transactions sendTransaction', () => {
     expect(result.content.hash).toEqual(tx.hash().toString('hex'))
   })
 
-  it('lets you configure the expiration', async () => {
+  it('lets you configure the expiration and confirmations', async () => {
     const account = await useAccountFixture(routeTest.node.wallet, 'expiration')
     const tx = await useMinersTxFixture(routeTest.node.wallet, account)
 
@@ -213,8 +228,11 @@ describe('Transactions sendTransaction', () => {
 
     jest.spyOn(routeTest.node.wallet, 'getBalance').mockResolvedValue({
       unconfirmed: BigInt(100000),
+      pending: BigInt(100000),
       confirmed: BigInt(100000),
+      available: BigInt(100000),
       unconfirmedCount: 0,
+      pendingCount: 0,
       blockHash: null,
       sequence: null,
     })
@@ -227,8 +245,8 @@ describe('Transactions sendTransaction', () => {
       expect.anything(),
       expect.anything(),
       expect.anything(),
-      expect.anything(),
       routeTest.node.config.get('transactionExpirationDelta'),
+      undefined,
       undefined,
     )
 
@@ -236,15 +254,16 @@ describe('Transactions sendTransaction', () => {
       ...TEST_PARAMS,
       expiration: 1234,
       expirationDelta: 12345,
+      confirmations: 10,
     })
 
     expect(sendSpy).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
       expect.anything(),
-      expect.anything(),
       12345,
       1234,
+      10,
     )
   })
 })

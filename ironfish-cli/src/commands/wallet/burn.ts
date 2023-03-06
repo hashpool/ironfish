@@ -1,20 +1,30 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-import { CurrencyUtils } from '@ironfish/sdk'
+import {
+  BufferUtils,
+  CreateTransactionRequest,
+  CurrencyUtils,
+  RawTransaction,
+  RawTransactionSerde,
+  Transaction,
+} from '@ironfish/sdk'
 import { CliUx, Flags } from '@oclif/core'
 import { IronfishCommand } from '../../command'
-import { RemoteFlags } from '../../flags'
-import { ProgressBar } from '../../types'
+import { IronFlag, RemoteFlags } from '../../flags'
 import { selectAsset } from '../../utils/asset'
+import { promptCurrency } from '../../utils/currency'
+import { selectFee } from '../../utils/fees'
+import { doEligibilityCheck } from '../../utils/testnet'
+import { watchTransaction } from '../../utils/transaction'
 
 export class Burn extends IronfishCommand {
   static description = 'Burn tokens and decrease supply for a given asset'
 
   static examples = [
-    '$ ironfish wallet:burn --assetId=618c098d8d008c9f78f6155947014901a019d9ec17160dc0f0d1bb1c764b29b4 --amount=1000',
-    '$ ironfish wallet:burn --assetId=618c098d8d008c9f78f6155947014901a019d9ec17160dc0f0d1bb1c764b29b4 --amount=1000 --account=otheraccount',
-    '$ ironfish wallet:burn --assetId=618c098d8d008c9f78f6155947014901a019d9ec17160dc0f0d1bb1c764b29b4 --amount=1000 --account=otheraccount --fee=0.00000001',
+    '$ ironfish wallet:burn --assetId 618c098d8d008c9f78f6155947014901a019d9ec17160dc0f0d1bb1c764b29b4 --amount 1000',
+    '$ ironfish wallet:burn --assetId 618c098d8d008c9f78f6155947014901a019d9ec17160dc0f0d1bb1c764b29b4 --amount 1000 --account otheraccount',
+    '$ ironfish wallet:burn --assetId 618c098d8d008c9f78f6155947014901a019d9ec17160dc0f0d1bb1c764b29b4 --amount 1000 --account otheraccount --fee 0.00000001',
   ]
 
   static flags = {
@@ -23,13 +33,16 @@ export class Burn extends IronfishCommand {
       char: 'f',
       description: 'The account to burn from',
     }),
-    fee: Flags.string({
+    fee: IronFlag({
       char: 'o',
       description: 'The fee amount in IRON',
+      largerThan: 0n,
+      flagName: 'fee',
     }),
-    amount: Flags.string({
+    amount: IronFlag({
       char: 'a',
-      description: 'Amount of coins to burn in IRON',
+      description: 'Amount of coins to burn',
+      flagName: 'amount',
     }),
     assetId: Flags.string({
       char: 'i',
@@ -39,144 +52,193 @@ export class Burn extends IronfishCommand {
       default: false,
       description: 'Confirm without asking',
     }),
+    confirmations: Flags.integer({
+      char: 'c',
+      description:
+        'Minimum number of block confirmations needed to include a note. Set to 0 to include all blocks.',
+      required: false,
+    }),
+    rawTransaction: Flags.boolean({
+      default: false,
+      description:
+        'Return raw transaction. Use it to create a transaction but not post to the network',
+    }),
+    expiration: Flags.integer({
+      char: 'e',
+      description:
+        'The block sequence that the transaction can not be mined after. Set to 0 for no expiration.',
+    }),
+    eligibility: Flags.boolean({
+      default: true,
+      allowNo: true,
+      description: 'check testnet eligibility',
+    }),
+    offline: Flags.boolean({
+      default: false,
+      description: 'Allow offline transaction creation',
+    }),
+    watch: Flags.boolean({
+      default: false,
+      description: 'Wait for the transaction to be confirmed',
+    }),
   }
 
   async start(): Promise<void> {
     const { flags } = await this.parse(Burn)
-    const client = await this.sdk.connectRpc(false, true)
+    const client = await this.sdk.connectRpc()
 
-    const status = await client.getNodeStatus()
-    if (!status.content.blockchain.synced) {
-      this.log(
-        `Your node must be synced with the Iron Fish network to send a transaction. Please try again later`,
-      )
-      this.exit(1)
+    if (flags.eligibility) {
+      await doEligibilityCheck(client, this.logger)
     }
 
-    let account = flags.account?.trim()
+    if (!flags.offline) {
+      const status = await client.getNodeStatus()
+      if (!status.content.blockchain.synced) {
+        this.log(
+          `Your node must be synced with the Iron Fish network to send a transaction. Please try again later`,
+        )
+        this.exit(1)
+      }
+    }
+
+    let account = flags.account
     if (!account) {
       const response = await client.getDefaultAccount()
-      const defaultAccount = response.content.account
 
-      if (!defaultAccount) {
+      if (!response.content.account) {
         this.error(
           `No account is currently active.
            Use ironfish wallet:create <name> to first create an account`,
         )
       }
 
-      account = defaultAccount.name
+      account = response.content.account.name
     }
 
     let assetId = flags.assetId
 
     if (assetId == null) {
-      assetId = await selectAsset(client, account, {
+      const asset = await selectAsset(client, account, {
         action: 'burn',
         showNativeAsset: false,
         showSingleAssetChoice: true,
+        confirmations: flags.confirmations,
       })
+
+      assetId = asset?.id
     }
 
     if (assetId == null) {
       this.error(`You must have a custom asset in order to burn.`)
     }
 
-    let amount
-    if (flags.amount) {
-      amount = CurrencyUtils.decodeIron(flags.amount)
-    } else {
-      const input = await CliUx.ux.prompt('Enter the amount to burn in the custom asset', {
+    let amount = flags.amount
+    if (!amount) {
+      amount = await promptCurrency({
+        client: client,
         required: true,
-      })
-
-      amount = CurrencyUtils.decodeIron(input)
-    }
-
-    let fee
-    if (flags.fee) {
-      fee = CurrencyUtils.decodeIron(flags.fee)
-    } else {
-      const input = await CliUx.ux.prompt(
-        `Enter the fee amount in $IRON (min: ${CurrencyUtils.renderIron(1n)})`,
-        {
-          default: CurrencyUtils.renderIron(1n),
-          required: true,
+        text: 'Enter the amount of the custom asset to burn',
+        minimum: 1n,
+        balance: {
+          account,
+          confirmations: flags.confirmations,
+          assetId,
         },
-      )
-
-      fee = CurrencyUtils.decodeIron(input)
-    }
-
-    if (!flags.confirm) {
-      this.log(`
-You are about to burn:
-${CurrencyUtils.renderIron(
-  amount,
-  true,
-  assetId,
-)} plus a transaction fee of ${CurrencyUtils.renderIron(fee, true)} with the account ${account}
-
-* This action is NOT reversible *
-`)
-
-      const confirm = await CliUx.ux.confirm('Do you confirm (Y/N)?')
-      if (!confirm) {
-        this.log('Transaction aborted.')
-        this.exit(0)
-      }
-    }
-
-    const bar = CliUx.ux.progress({
-      barCompleteChar: '\u2588',
-      barIncompleteChar: '\u2591',
-      format: 'Creating the transaction: [{bar}] {percentage}% | ETA: {eta}s',
-    }) as ProgressBar
-
-    bar.start()
-
-    let value = 0
-    const timer = setInterval(() => {
-      value++
-      bar.update(value)
-      if (value >= bar.getTotal()) {
-        bar.stop()
-      }
-    }, 1000)
-
-    const stopProgressBar = () => {
-      clearInterval(timer)
-      bar.update(100)
-      bar.stop()
-    }
-
-    try {
-      const result = await client.burnAsset({
-        account,
-        assetId,
-        fee: CurrencyUtils.encode(fee),
-        value: CurrencyUtils.encode(amount),
       })
-
-      stopProgressBar()
-
-      const response = result.content
-      this.log(`
-Burned asset ${response.assetId} from ${account}
-Value: ${CurrencyUtils.renderIron(response.value)}
-
-Transaction Hash: ${response.hash}
-
-Find the transaction on https://explorer.ironfish.network/transaction/${
-        response.hash
-      } (it can take a few minutes before the transaction appears in the Explorer)`)
-    } catch (error: unknown) {
-      stopProgressBar()
-      this.log(`An error occurred while burning the asset.`)
-      if (error instanceof Error) {
-        this.error(error.message)
-      }
-      this.exit(2)
     }
+
+    const params: CreateTransactionRequest = {
+      account,
+      outputs: [],
+      burns: [
+        {
+          assetId,
+          value: CurrencyUtils.encode(amount),
+        },
+      ],
+      fee: flags.fee ? CurrencyUtils.encode(flags.fee) : null,
+      expiration: flags.expiration,
+      confirmations: flags.confirmations,
+    }
+
+    let raw: RawTransaction
+    if (params.fee === null) {
+      raw = await selectFee({
+        client,
+        transaction: params,
+      })
+    } else {
+      const response = await client.createTransaction(params)
+      const bytes = Buffer.from(response.content.transaction, 'hex')
+      raw = RawTransactionSerde.deserialize(bytes)
+    }
+
+    if (flags.rawTransaction) {
+      this.log('Raw Transaction')
+      this.log(RawTransactionSerde.serialize(raw).toString('hex'))
+      this.log(`Run "ironfish wallet:post" to post the raw transaction. `)
+      this.exit(0)
+    }
+
+    if (!flags.confirm && !(await this.confirm(assetId, amount, raw.fee, account))) {
+      this.error('Transaction aborted.')
+    }
+
+    CliUx.ux.action.start('Sending the transaction')
+
+    const response = await client.postTransaction({
+      transaction: RawTransactionSerde.serialize(raw).toString('hex'),
+      account,
+    })
+
+    const bytes = Buffer.from(response.content.transaction, 'hex')
+    const transaction = new Transaction(bytes)
+
+    CliUx.ux.action.stop()
+
+    const assetResponse = await client.getAsset({ id: assetId })
+    const assetName = BufferUtils.toHuman(Buffer.from(assetResponse.content.name, 'hex'))
+
+    this.log(`Burned asset ${assetName} from ${account}`)
+    this.log(`Asset Identifier: ${assetId}`)
+    this.log(`Amount: ${CurrencyUtils.renderIron(amount)}`)
+    this.log(`Hash: ${transaction.hash().toString('hex')}`)
+    this.log(`Fee: ${CurrencyUtils.renderIron(transaction.fee(), true)}`)
+    this.log(
+      `\nIf the transaction is mined, it will appear here https://explorer.ironfish.network/transaction/${transaction
+        .hash()
+        .toString('hex')}`,
+    )
+
+    if (flags.watch) {
+      this.log('')
+
+      await watchTransaction({
+        client,
+        logger: this.logger,
+        account,
+        hash: transaction.hash().toString('hex'),
+      })
+    }
+  }
+
+  async confirm(
+    assetId: string,
+    amount: bigint,
+    fee: bigint,
+    account: string,
+  ): Promise<boolean> {
+    this.log(
+      `You are about to burn: ${CurrencyUtils.renderIron(
+        amount,
+        true,
+        assetId,
+      )} plus a transaction fee of ${CurrencyUtils.renderIron(
+        fee,
+        true,
+      )} with the account ${account}`,
+    )
+
+    return CliUx.ux.confirm('Do you confirm (Y/N)?')
   }
 }

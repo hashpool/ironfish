@@ -13,20 +13,6 @@ describe('mint', () => {
     await routeTest.node.wallet.createAccount('account', true)
   })
 
-  describe('with no default account', () => {
-    it('throws a validation error', async () => {
-      await expect(
-        routeTest.client.mintAsset({
-          account: 'fake-account',
-          fee: '1',
-          metadata: '{ url: hello }',
-          name: 'fake-coin',
-          value: '1',
-        }),
-      ).rejects.toThrow('No account found with name fake-account')
-    })
-  })
-
   describe('with an invalid fee', () => {
     it('throws a validation error', async () => {
       await expect(
@@ -37,7 +23,7 @@ describe('mint', () => {
           name: 'fake-coin',
           value: '100',
         }),
-      ).rejects.toThrow('Invalid transaction fee')
+      ).rejects.toThrow('value must be equal to or greater than 1')
     })
   })
 
@@ -51,7 +37,7 @@ describe('mint', () => {
           name: 'fake-coin',
           value: '-1',
         }),
-      ).rejects.toThrow('Invalid mint amount')
+      ).rejects.toThrow('value must be equal to or greater than 1')
     })
   })
 
@@ -62,17 +48,24 @@ describe('mint', () => {
       const account = await useAccountFixture(wallet)
 
       const asset = new Asset(account.spendingKey, 'mint-asset', 'metadata')
-      const value = BigInt(10)
+      const mintData = {
+        name: asset.name().toString('utf8'),
+        metadata: asset.metadata().toString('utf8'),
+        value: 10n,
+        isNewAsset: true,
+      }
+
       const mintTransaction = await useTxFixture(wallet, account, account, async () => {
-        const raw = await wallet.createTransaction(
+        const raw = await wallet.createTransaction({
           account,
-          [],
-          [{ asset, value }],
-          [],
-          BigInt(0),
-          0,
-        )
-        return wallet.postTransaction(raw, node.memPool)
+          mints: [mintData],
+          fee: 0n,
+          expiration: 0,
+        })
+        return wallet.post({
+          transaction: raw,
+          account,
+        })
       })
 
       jest.spyOn(wallet, 'mint').mockResolvedValueOnce(mintTransaction)
@@ -82,13 +75,13 @@ describe('mint', () => {
         fee: '1',
         metadata: asset.metadata().toString('hex'),
         name: asset.name().toString('hex'),
-        value: CurrencyUtils.encode(value),
+        value: CurrencyUtils.encode(mintData.value),
       })
 
       expect(response.content).toEqual({
         assetId: asset.id().toString('hex'),
         hash: mintTransaction.hash().toString('hex'),
-        name: asset.name().toString('utf8'),
+        name: asset.name().toString('hex'),
         value: mintTransaction.mints[0].value.toString(),
       })
     })

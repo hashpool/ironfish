@@ -13,8 +13,13 @@ export const DEFAULT_DISCORD_INVITE = 'https://discord.ironfish.network'
 export const DEFAULT_USE_RPC_IPC = true
 export const DEFAULT_USE_RPC_TCP = false
 export const DEFAULT_USE_RPC_TLS = true
-export const DEFAULT_POOL_HOST = '0.0.0.0'
+export const DEFAULT_POOL_HOST = '::'
 export const DEFAULT_POOL_PORT = 9034
+export const DEFAULT_NETWORK_ID = 0
+export const DEFAULT_FEE_ESTIMATOR_MAX_BLOCK_HISTORY = 10
+export const DEFAULT_FEE_ESTIMATOR_PERCENTILE_SLOW = 10
+export const DEFAULT_FEE_ESTIMATOR_PERCENTILE_AVERAGE = 20
+export const DEFAULT_FEE_ESTIMATOR_PERCENTILE_FAST = 30
 
 export type ConfigOptions = {
   bootstrapNodes: string[]
@@ -144,11 +149,6 @@ export type ConfigOptions = {
   poolBanning: boolean
 
   /**
-   * The percent of the confirmed balance of the pool's account that it will payout
-   */
-  poolBalancePercentPayout: number
-
-  /**
    * The host that the pool is listening for miner connections on.
    */
   poolHost: string
@@ -164,16 +164,6 @@ export type ConfigOptions = {
   poolDifficulty: string
 
   /**
-   * The length of time in seconds that the pool will wait between checking if it is time to make a payout.
-   */
-  poolAttemptPayoutInterval: number
-
-  /**
-   * The length of time in seconds that the pool will wait between successful payouts.
-   */
-  poolSuccessfulPayoutInterval: number
-
-  /**
    * The length of time in seconds that the pool will wait between status
    * messages. Setting to 0 disables status messages.
    */
@@ -183,6 +173,12 @@ export type ConfigOptions = {
    * The length of time in seconds that will be used to calculate hashrate for the pool.
    */
   poolRecentShareCutoff: number
+
+  /**
+   * The length of time in seconds for each payout period. This is used to
+   * calculate the number of shares and how much they earn per period.
+   */
+  poolPayoutPeriodDuration: number
 
   /**
    * The discord webhook URL to post pool critical pool information to
@@ -216,10 +212,26 @@ export type ConfigOptions = {
    */
   explorerTransactionsUrl: string
 
+  /**
+   * How many blocks back from the head of the chain to use to calculate the fee
+   * estimate
+   */
   feeEstimatorMaxBlockHistory: number
-  feeEstimatorPercentileLow: number
-  feeEstimatorPercentileMedium: number
-  feeEstimatorPercentileHigh: number
+
+  /**
+   * The percentile to use as an estimate for a slow transaction
+   */
+  feeEstimatorPercentileSlow: number
+
+  /**
+   * The percentile to use as an estimate for an average transaction
+   */
+  feeEstimatorPercentileAverage: number
+
+  /**
+   * The percentile to use as an estimate for a fast transaction
+   */
+  feeEstimatorPercentileFast: number
 
   /**
    * Network ID of an official Iron Fish network
@@ -284,20 +296,22 @@ export const ConfigOptionsSchema: yup.ObjectSchema<Partial<ConfigOptions>> = yup
     poolName: yup.string(),
     poolAccountName: yup.string(),
     poolBanning: yup.boolean(),
-    poolBalancePercentPayout: YupUtils.isPercent,
     poolHost: yup.string().trim(),
     poolPort: YupUtils.isPort,
     poolDifficulty: yup.string(),
-    poolAttemptPayoutInterval: YupUtils.isPositiveInteger,
-    poolSuccessfulPayoutInterval: YupUtils.isPositiveInteger,
     poolStatusNotificationInterval: YupUtils.isPositiveInteger,
     poolRecentShareCutoff: YupUtils.isPositiveInteger,
+    poolPayoutPeriodDuration: YupUtils.isPositiveInteger,
     poolDiscordWebhook: yup.string(),
     poolMaxConnectionsPerIp: YupUtils.isPositiveInteger,
     poolLarkWebhook: yup.string(),
     jsonLogs: yup.boolean(),
     explorerBlocksUrl: YupUtils.isUrl,
     explorerTransactionsUrl: YupUtils.isUrl,
+    feeEstimatorMaxBlockHistory: YupUtils.isPositiveInteger,
+    feeEstimatorPercentileSlow: YupUtils.isPositiveInteger,
+    feeEstimatorPercentileAverage: YupUtils.isPositiveInteger,
+    feeEstimatorPercentileFast: YupUtils.isPositiveInteger,
     networkId: yup.number().integer().min(0),
     customNetwork: yup.string().trim(),
     maxSyncedAgeBlocks: yup.number().integer().min(0),
@@ -366,25 +380,23 @@ export class Config extends KeyStore<ConfigOptions> {
       poolName: 'Iron Fish Pool',
       poolAccountName: 'default',
       poolBanning: true,
-      poolBalancePercentPayout: 10,
       poolHost: DEFAULT_POOL_HOST,
       poolPort: DEFAULT_POOL_PORT,
       poolDifficulty: '15000000000',
-      poolAttemptPayoutInterval: 15 * 60, // 15 minutes
-      poolSuccessfulPayoutInterval: 2 * 60 * 60, // 2 hours
       poolStatusNotificationInterval: 30 * 60, // 30 minutes
       poolRecentShareCutoff: 2 * 60 * 60, // 2 hours
+      poolPayoutPeriodDuration: 2 * 60 * 60, // 2 hours
       poolDiscordWebhook: '',
       poolMaxConnectionsPerIp: 0,
       poolLarkWebhook: '',
       jsonLogs: false,
       explorerBlocksUrl: 'https://explorer.ironfish.network/blocks/',
       explorerTransactionsUrl: 'https://explorer.ironfish.network/transaction/',
-      feeEstimatorMaxBlockHistory: 10,
-      feeEstimatorPercentileLow: 10,
-      feeEstimatorPercentileMedium: 20,
-      feeEstimatorPercentileHigh: 30,
-      networkId: 2,
+      feeEstimatorMaxBlockHistory: DEFAULT_FEE_ESTIMATOR_MAX_BLOCK_HISTORY,
+      feeEstimatorPercentileSlow: DEFAULT_FEE_ESTIMATOR_PERCENTILE_SLOW,
+      feeEstimatorPercentileAverage: DEFAULT_FEE_ESTIMATOR_PERCENTILE_AVERAGE,
+      feeEstimatorPercentileFast: DEFAULT_FEE_ESTIMATOR_PERCENTILE_FAST,
+      networkId: DEFAULT_NETWORK_ID,
       customNetwork: '',
       maxSyncedAgeBlocks: 60,
       networkDefinitionPath: files.resolve(files.join(dataDir, 'network.json')),

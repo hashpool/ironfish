@@ -25,7 +25,7 @@ export class BalanceCommand extends IronfishCommand {
     }),
     confirmations: Flags.integer({
       required: false,
-      description: 'Minimum number of blocks confirmations for a note',
+      description: 'Minimum number of blocks confirmations for a transaction',
     }),
     assetId: Flags.string({
       required: false,
@@ -65,23 +65,38 @@ export class BalanceCommand extends IronfishCommand {
       this.log(`Head Hash: ${response.content.blockHash || 'NULL'}`)
       this.log(`Head Sequence: ${response.content.sequence || 'NULL'}`)
       this.log(
-        `Balance:     ${CurrencyUtils.renderIron(response.content.confirmed, true, assetId)}`,
+        `Available:   ${CurrencyUtils.renderIron(response.content.available, true, assetId)}`,
+      )
+      this.log(
+        `Confirmed:   ${CurrencyUtils.renderIron(response.content.confirmed, true, assetId)}`,
       )
       this.log(
         `Unconfirmed: ${CurrencyUtils.renderIron(response.content.unconfirmed, true, assetId)}`,
+      )
+      this.log(
+        `Pending:     ${CurrencyUtils.renderIron(response.content.pending, true, assetId)}`,
       )
       return
     }
 
     this.log(`Account: ${response.content.account}`)
-    this.log(`Balance: ${CurrencyUtils.renderIron(response.content.confirmed, true, assetId)}`)
+    this.log(
+      `Available Balance: ${CurrencyUtils.renderIron(
+        response.content.available,
+        true,
+        assetId,
+      )}`,
+    )
   }
 
   explainBalance(response: GetBalanceResponse, assetId: string): void {
     const unconfirmed = CurrencyUtils.decode(response.unconfirmed)
     const confirmed = CurrencyUtils.decode(response.confirmed)
+    const pending = CurrencyUtils.decode(response.pending)
+    const available = CurrencyUtils.decode(response.available)
 
     const unconfirmedDelta = unconfirmed - confirmed
+    const pendingDelta = pending - unconfirmed
 
     this.log(`Account: ${response.account}`)
 
@@ -92,15 +107,27 @@ export class BalanceCommand extends IronfishCommand {
     )
     this.log('')
 
-    this.log(`Your balance is made of notes on the chain that are safe to spend`)
-    this.log(`Balance: ${CurrencyUtils.renderIron(confirmed, true, assetId)}`)
+    this.log(`Your available balance is made of notes on the chain that are safe to spend`)
+    this.log(`Available: ${CurrencyUtils.renderIron(available, true, assetId)}`)
+    this.log('')
+
+    this.log('Your confirmed balance includes all notes from transactions on the chain')
+    this.log(`Confirmed: ${CurrencyUtils.renderIron(confirmed, true, assetId)}`)
     this.log('')
 
     this.log(
-      `${response.unconfirmedCount} notes worth ${CurrencyUtils.renderIron(
+      `${response.unconfirmedCount} transactions worth ${CurrencyUtils.renderIron(
         unconfirmedDelta,
       )} are on the chain within ${response.confirmations} blocks of the head`,
     )
     this.log(`Unconfirmed: ${CurrencyUtils.renderIron(unconfirmed, true, assetId)}`)
+    this.log('')
+
+    this.log(
+      `${response.pendingCount} transactions worth ${CurrencyUtils.renderIron(
+        pendingDelta,
+      )} are pending and have not been added to the chain`,
+    )
+    this.log(`Pending: ${CurrencyUtils.renderIron(pending, true, assetId)}`)
   }
 }

@@ -56,6 +56,10 @@ mod value_balances;
 const SIGNATURE_HASH_PERSONALIZATION: &[u8; 8] = b"IFsighsh";
 const TRANSACTION_SIGNATURE_VERSION: &[u8; 1] = &[0];
 pub const TRANSACTION_VERSION: u8 = 1;
+pub const TRANSACTION_SIGNATURE_SIZE: usize = 64;
+pub const TRANSACTION_PUBLIC_KEY_SIZE: usize = 32;
+pub const TRANSACTION_EXPIRATION_SIZE: usize = 4;
+pub const TRANSACTION_FEE_SIZE: usize = 8;
 
 /// A collection of spend and output proofs that can be signed and verified.
 /// In general, all the spent values should add up to all the output values.
@@ -229,11 +233,15 @@ impl ProposedTransaction {
         {
             return Err(IronfishError::InvalidMinersFeeTransaction);
         }
-        // Ensure the merkle note has an identifiable encryption key
-        self.outputs
-            .get_mut(0)
-            .ok_or(IronfishError::InvalidMinersFeeTransaction)?
-            .set_is_miners_fee();
+        self.post_miners_fee_unchecked()
+    }
+
+    /// Do not call this directly -- see post_miners_fee.
+    pub fn post_miners_fee_unchecked(&mut self) -> Result<Transaction, IronfishError> {
+        // Set note_encryption_keys to a constant value on the outputs
+        for output in &mut self.outputs {
+            output.set_is_miners_fee();
+        }
         self._partial_post()
     }
 
@@ -254,8 +262,9 @@ impl ProposedTransaction {
         // The public key after randomization has been applied. This is used
         // during signature verification. Referred to as `rk` in the literature
         // Calculated from the authorizing key and the public_key_randomness.
-        let randomized_public_key = redjubjub::PublicKey(self.spender_key.authorizing_key.into())
-            .randomize(self.public_key_randomness, SPENDING_KEY_GENERATOR);
+        let randomized_public_key =
+            redjubjub::PublicKey(self.spender_key.view_key.authorizing_key.into())
+                .randomize(self.public_key_randomness, SPENDING_KEY_GENERATOR);
 
         // Build descriptions
         let mut unsigned_spends = Vec::with_capacity(self.spends.len());
@@ -357,8 +366,9 @@ impl ProposedTransaction {
             .write_i64::<LittleEndian>(*self.value_balances.fee())
             .unwrap();
 
-        let randomized_public_key = redjubjub::PublicKey(self.spender_key.authorizing_key.into())
-            .randomize(self.public_key_randomness, SPENDING_KEY_GENERATOR);
+        let randomized_public_key =
+            redjubjub::PublicKey(self.spender_key.view_key.authorizing_key.into())
+                .randomize(self.public_key_randomness, SPENDING_KEY_GENERATOR);
 
         hasher
             .write_all(&randomized_public_key.0.to_bytes())
@@ -400,9 +410,10 @@ impl ProposedTransaction {
         public_key: &PublicKey,
         transaction_signature_hash: &[u8; 32],
     ) -> Result<Signature, IronfishError> {
-        let mut data_to_be_signed = [0u8; 64];
-        data_to_be_signed[..32].copy_from_slice(&public_key.0.to_bytes());
-        data_to_be_signed[32..].copy_from_slice(transaction_signature_hash);
+        let mut data_to_be_signed = [0u8; TRANSACTION_SIGNATURE_SIZE];
+        data_to_be_signed[..TRANSACTION_PUBLIC_KEY_SIZE].copy_from_slice(&public_key.0.to_bytes());
+        data_to_be_signed[TRANSACTION_PUBLIC_KEY_SIZE..]
+            .copy_from_slice(transaction_signature_hash);
 
         Ok(private_key.sign(
             &data_to_be_signed,

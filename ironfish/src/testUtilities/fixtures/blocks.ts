@@ -7,10 +7,9 @@ import { Blockchain } from '../../blockchain'
 import { IronfishNode } from '../../node'
 import { Block, BlockSerde, SerializedBlock } from '../../primitives/block'
 import { BurnDescription } from '../../primitives/burnDescription'
-import { MintDescription } from '../../primitives/mintDescription'
 import { Note } from '../../primitives/note'
 import { NoteEncrypted } from '../../primitives/noteEncrypted'
-import { RawTransaction } from '../../primitives/rawTransaction'
+import { MintData, RawTransaction } from '../../primitives/rawTransaction'
 import { Transaction } from '../../primitives/transaction'
 import { Account, Wallet } from '../../wallet'
 import { WorkerPool } from '../../workerPool/pool'
@@ -73,7 +72,7 @@ export async function useMinerBlockFixture(
   addTransactionsTo?: Wallet,
   transactions: Transaction[] = [],
 ): Promise<Block> {
-  const spendingKey = account ? account.spendingKey : generateKey().spending_key
+  const spendingKey = account?.spendingKey ?? generateKey().spendingKey
   const transactionFees = transactions.reduce((a, t) => a + t.fee(), BigInt(0))
 
   return await useBlockFixture(
@@ -106,7 +105,13 @@ export async function useMintBlockFixture(options: {
     node: options.node,
     wallet: options.node.wallet,
     from: options.account,
-    mints: [{ asset: options.asset, value: options.value }],
+    mints: [
+      {
+        name: options.asset.name().toString('utf8'),
+        metadata: options.asset.metadata().toString('utf8'),
+        value: options.value,
+      },
+    ],
   })
 
   return useMinerBlockFixture(options.node.chain, options.sequence, undefined, undefined, [
@@ -142,8 +147,8 @@ export async function useBlockWithRawTxFixture(
   pool: WorkerPool,
   sender: Account,
   notesToSpend: NoteEncrypted[],
-  receives: { publicAddress: string; amount: bigint; memo: string; assetId: Buffer }[],
-  mints: MintDescription[],
+  outputs: { publicAddress: string; amount: bigint; memo: string; assetId: Buffer }[],
+  mints: MintData[],
   burns: BurnDescription[],
   sequence: number,
 ): Promise<Block> {
@@ -152,7 +157,7 @@ export async function useBlockWithRawTxFixture(
       notesToSpend.map(async (n) => {
         const note = n.decryptNoteForOwner(sender.incomingViewKey)
         Assert.isNotUndefined(note)
-        const treeIndex = await chain.notes.leavesIndex.get(n.merkleHash())
+        const treeIndex = await chain.notes.leavesIndex.get(n.hash())
         Assert.isNotUndefined(treeIndex)
         const witness = await chain.notes.witness(treeIndex)
         Assert.isNotNull(witness)
@@ -165,26 +170,26 @@ export async function useBlockWithRawTxFixture(
     )
 
     const raw = new RawTransaction()
-    raw.spendingKey = sender.spendingKey
     raw.expiration = 0
     raw.mints = mints
     raw.burns = burns
     raw.fee = BigInt(0)
     raw.spends = spends
 
-    for (const receive of receives) {
+    for (const output of outputs) {
       const note = new NativeNote(
-        receive.publicAddress,
-        receive.amount,
-        receive.memo,
-        receive.assetId,
+        output.publicAddress,
+        output.amount,
+        output.memo,
+        output.assetId,
         sender.publicAddress,
       )
 
-      raw.receives.push({ note: new Note(note.serialize()) })
+      raw.outputs.push({ note: new Note(note.serialize()) })
     }
 
-    const transaction = await pool.postTransaction(raw)
+    Assert.isNotNull(sender.spendingKey)
+    const transaction = await pool.postTransaction(raw, sender.spendingKey)
 
     return chain.newBlock(
       [transaction],
@@ -211,9 +216,15 @@ export async function useBlockWithTx(
     expiration?: number
     fee?: number
   } = { expiration: 0 },
-): Promise<{ account: Account; previous: Block; block: Block; transaction: Transaction }> {
+  broadcast = true,
+): Promise<{
+  account: Account
+  previous: Block
+  block: Block
+  transaction: Transaction
+}> {
   if (!from) {
-    from = await useAccountFixture(node.wallet, () => node.wallet.createAccount('test'))
+    from = await useAccountFixture(node.wallet, 'test')
   }
 
   if (!to) {
@@ -235,9 +246,9 @@ export async function useBlockWithTx(
     Assert.isNotUndefined(from)
     Assert.isNotUndefined(to)
 
-    const raw = await node.wallet.createTransaction(
-      from,
-      [
+    const raw = await node.wallet.createTransaction({
+      account: from,
+      outputs: [
         {
           publicAddress: to.publicAddress,
           amount: BigInt(1),
@@ -245,18 +256,20 @@ export async function useBlockWithTx(
           assetId: Asset.nativeId(),
         },
       ],
-      [],
-      [],
-      BigInt(options.fee ?? 1),
-      0,
-      options.expiration ?? 0,
-    )
+      fee: BigInt(options.fee ?? 1n),
+      expiration: options.expiration ?? 0,
+      expirationDelta: 0,
+    })
 
-    const transaction = await node.wallet.postTransaction(raw, node.memPool)
+    const transaction = await node.wallet.post({
+      transaction: raw,
+      account: from,
+      broadcast,
+    })
 
     return node.chain.newBlock(
       [transaction],
-      await node.strategy.createMinersFee(transaction.fee(), 3, generateKey().spending_key),
+      await node.strategy.createMinersFee(transaction.fee(), 3, generateKey().spendingKey),
     )
   })
 
@@ -274,9 +287,13 @@ export async function useBlockWithTxs(
   node: IronfishNode,
   numTransactions: number,
   from?: Account,
-): Promise<{ account: Account; block: Block; transactions: Transaction[] }> {
+): Promise<{
+  account: Account
+  block: Block
+  transactions: Transaction[]
+}> {
   if (!from) {
-    from = await useAccountFixture(node.wallet, () => node.wallet.createAccount('test'))
+    from = await useAccountFixture(node.wallet, 'test')
   }
   const to = from
 
@@ -293,9 +310,9 @@ export async function useBlockWithTxs(
     for (let i = 0; i < numTransactions; i++) {
       Assert.isNotUndefined(from)
 
-      const raw = await node.wallet.createTransaction(
-        from,
-        [
+      const raw = await node.wallet.createTransaction({
+        account: from,
+        outputs: [
           {
             publicAddress: to.publicAddress,
             amount: BigInt(1),
@@ -303,14 +320,15 @@ export async function useBlockWithTxs(
             assetId: Asset.nativeId(),
           },
         ],
-        [],
-        [],
-        BigInt(1),
-        0,
-        0,
-      )
+        fee: 1n,
+        expiration: 0,
+        expirationDelta: 0,
+      })
 
-      const transaction = await node.wallet.postTransaction(raw, node.memPool)
+      const transaction = await node.wallet.post({
+        transaction: raw,
+        account: from,
+      })
 
       await node.wallet.addPendingTransaction(transaction)
       transactions.push(transaction)
@@ -322,7 +340,7 @@ export async function useBlockWithTxs(
 
     return node.chain.newBlock(
       transactions,
-      await node.strategy.createMinersFee(transactionFees, 3, generateKey().spending_key),
+      await node.strategy.createMinersFee(transactionFees, 3, generateKey().spendingKey),
     )
   })
 
@@ -334,6 +352,7 @@ export async function useTxSpendsFixture(
   options?: {
     account?: Account
     expiration?: number
+    restore?: boolean
   },
 ): Promise<{ account: Account; transaction: Transaction }> {
   const account = options?.account ?? (await useAccountFixture(node.wallet))
@@ -350,6 +369,7 @@ export async function useTxSpendsFixture(
     undefined,
     undefined,
     options?.expiration,
+    options?.restore,
   )
 
   return {

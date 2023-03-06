@@ -4,8 +4,13 @@
 import * as yup from 'yup'
 import { RawTransactionSerde } from '../../../primitives/rawTransaction'
 import { ApiNamespace, router } from '../router'
+import { getAccount } from './utils'
 
-export type PostTransactionRequest = { transaction: string }
+export type PostTransactionRequest = {
+  account?: string
+  transaction: string
+  broadcast?: boolean
+}
 
 export type PostTransactionResponse = {
   transaction: string
@@ -13,7 +18,9 @@ export type PostTransactionResponse = {
 
 export const PostTransactionRequestSchema: yup.ObjectSchema<PostTransactionRequest> = yup
   .object({
+    account: yup.string().strip(true),
     transaction: yup.string().defined(),
+    broadcast: yup.boolean().optional(),
   })
   .defined()
 
@@ -27,11 +34,18 @@ router.register<typeof PostTransactionRequestSchema, PostTransactionResponse>(
   `${ApiNamespace.wallet}/postTransaction`,
   PostTransactionRequestSchema,
   async (request, node): Promise<void> => {
-    const rawTransactionBytes = Buffer.from(request.data.transaction, 'hex')
-    const rawTransaction = RawTransactionSerde.deserialize(rawTransactionBytes)
-    const postedTransaction = await node.wallet.postTransaction(rawTransaction, node.memPool)
-    const postedTransactionBytes = postedTransaction.serialize()
+    const account = getAccount(node, request.data.account)
 
-    request.end({ transaction: postedTransactionBytes.toString('hex') })
+    const bytes = Buffer.from(request.data.transaction, 'hex')
+    const raw = RawTransactionSerde.deserialize(bytes)
+
+    const transaction = await node.wallet.post({
+      transaction: raw,
+      account,
+      broadcast: request.data.broadcast,
+    })
+
+    const serialized = transaction.serialize()
+    request.end({ transaction: serialized.toString('hex') })
   },
 )

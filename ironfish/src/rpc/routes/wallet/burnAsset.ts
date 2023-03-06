@@ -3,9 +3,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 import * as yup from 'yup'
 import { Assert } from '../../../assert'
-import { CurrencyUtils } from '../../../utils'
-import { ValidationError } from '../../adapters'
+import { CurrencyUtils, YupUtils } from '../../../utils'
 import { ApiNamespace, router } from '../router'
+import { getAccount } from './utils'
 
 export interface BurnAssetRequest {
   account: string
@@ -14,11 +14,13 @@ export interface BurnAssetRequest {
   value: string
   expiration?: number
   expirationDelta?: number
+  confirmations?: number
 }
 
 export interface BurnAssetResponse {
   assetId: string
   hash: string
+  name: string
   value: string
 }
 
@@ -26,10 +28,11 @@ export const BurnAssetRequestSchema: yup.ObjectSchema<BurnAssetRequest> = yup
   .object({
     account: yup.string().required(),
     assetId: yup.string().required(),
-    fee: yup.string().required(),
-    value: yup.string().required(),
+    fee: YupUtils.currency({ min: 1n }).defined(),
+    value: YupUtils.currency({ min: 1n }).defined(),
     expiration: yup.number().optional(),
     expirationDelta: yup.number().optional(),
+    confirmations: yup.number().optional(),
   })
   .defined()
 
@@ -37,6 +40,7 @@ export const BurnAssetResponseSchema: yup.ObjectSchema<BurnAssetResponse> = yup
   .object({
     assetId: yup.string().required(),
     hash: yup.string().required(),
+    name: yup.string().required(),
     value: yup.string().required(),
   })
   .defined()
@@ -45,29 +49,23 @@ router.register<typeof BurnAssetRequestSchema, BurnAssetResponse>(
   `${ApiNamespace.wallet}/burnAsset`,
   BurnAssetRequestSchema,
   async (request, node): Promise<void> => {
-    const account = node.wallet.getAccountByName(request.data.account)
-    if (!account) {
-      throw new ValidationError(`No account found with name ${request.data.account}`)
-    }
+    const account = getAccount(node, request.data.account)
 
     const fee = CurrencyUtils.decode(request.data.fee)
-    if (fee < 1n) {
-      throw new ValidationError(`Invalid transaction fee, ${fee}`)
-    }
-
     const value = CurrencyUtils.decode(request.data.value)
-    if (value <= 0) {
-      throw new ValidationError('Invalid burn amount')
-    }
+
+    const assetId = Buffer.from(request.data.assetId, 'hex')
+    const asset = await node.chain.getAssetById(assetId)
+    Assert.isNotNull(asset)
 
     const transaction = await node.wallet.burn(
-      node.memPool,
       account,
-      Buffer.from(request.data.assetId, 'hex'),
+      assetId,
       value,
       fee,
       request.data.expirationDelta ?? node.config.get('transactionExpirationDelta'),
       request.data.expiration,
+      request.data.confirmations,
     )
     Assert.isEqual(transaction.burns.length, 1)
     const burn = transaction.burns[0]
@@ -75,6 +73,7 @@ router.register<typeof BurnAssetRequestSchema, BurnAssetResponse>(
     request.end({
       assetId: burn.assetId.toString('hex'),
       hash: transaction.hash().toString('hex'),
+      name: asset.name.toString('hex'),
       value: CurrencyUtils.encode(burn.value),
     })
   },

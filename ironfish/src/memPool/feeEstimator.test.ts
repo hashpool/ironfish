@@ -1,31 +1,29 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-import { Asset } from '@ironfish/rust-nodejs'
 import { Assert } from '../assert'
 import { getBlockSize } from '../network/utils/serializers'
 import { Block, Transaction } from '../primitives'
-import { NOTE_ENCRYPTED_SERIALIZED_SIZE_IN_BYTE } from '../primitives/noteEncrypted'
-import { SPEND_SERIALIZED_SIZE_IN_BYTE } from '../primitives/spend'
 import {
   createNodeTest,
   useAccountFixture,
   useBlockWithTx,
   useBlockWithTxs,
 } from '../testUtilities'
-import { AsyncUtils } from '../utils/async'
-import { FeeEstimator, FeeRateEntry, getFee, getFeeRate, PRIORITY_LEVELS } from './feeEstimator'
+import { BigIntUtils } from '../utils'
+import { FeeEstimator, FeeRateEntry, getFeeRate, PRIORITY_LEVELS } from './feeEstimator'
 
 function getEstimateFeeRate(
   block: Block,
   transaction: Transaction,
   maxBlockSize: number,
+  feeEstimator: FeeEstimator,
 ): bigint {
   const blockSize = getBlockSize(block)
   const blockSizeRatio = BigInt(Math.round((blockSize / maxBlockSize) * 100))
   let feeRate = getFeeRate(transaction)
   feeRate = (feeRate * blockSizeRatio) / 100n
-  return feeRate
+  return BigIntUtils.max(feeRate, feeEstimator.minFeeRate)
 }
 
 describe('FeeEstimator', () => {
@@ -42,7 +40,6 @@ describe('FeeEstimator', () => {
       await node.chain.addBlock(block)
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 1,
       })
       await feeEstimator.init(node.chain)
@@ -51,7 +48,9 @@ describe('FeeEstimator', () => {
         block,
         transaction,
         node.chain.consensus.parameters.maxBlockSizeBytes,
+        feeEstimator,
       )
+
       expect(feeEstimator.estimateFeeRate(PRIORITY_LEVELS[0])).toBe(feeRate)
       expect(feeEstimator.estimateFeeRate(PRIORITY_LEVELS[1])).toBe(feeRate)
       expect(feeEstimator.estimateFeeRate(PRIORITY_LEVELS[2])).toBe(feeRate)
@@ -81,7 +80,6 @@ describe('FeeEstimator', () => {
       await node.chain.addBlock(block2)
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 1,
       })
 
@@ -95,6 +93,7 @@ describe('FeeEstimator', () => {
         block,
         transaction2,
         node.chain.consensus.parameters.maxBlockSizeBytes,
+        feeEstimator,
       )
 
       expect(feeEstimator.estimateFeeRate(PRIORITY_LEVELS[0])).toBe(feeRate)
@@ -131,7 +130,6 @@ describe('FeeEstimator', () => {
       await node.wallet.updateHead()
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 2,
       })
       await feeEstimator.init(node.chain)
@@ -140,7 +138,7 @@ describe('FeeEstimator', () => {
       expect(feeEstimator.size(PRIORITY_LEVELS[1])).toBe(2)
       expect(feeEstimator.size(PRIORITY_LEVELS[2])).toBe(2)
       let queue: FeeRateEntry[] | undefined
-      Assert.isNotUndefined((queue = feeEstimator['queues']['low']))
+      Assert.isNotUndefined((queue = feeEstimator['queues']['slow']))
       expect(queue[0].feeRate).toEqual(getFeeRate(transaction))
       expect(queue[1].feeRate).toEqual(getFeeRate(transaction2))
     })
@@ -156,7 +154,6 @@ describe('FeeEstimator', () => {
       await node.chain.addBlock(block)
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 1,
       })
 
@@ -176,6 +173,7 @@ describe('FeeEstimator', () => {
         block,
         transaction,
         node.chain.consensus.parameters.maxBlockSizeBytes,
+        feeEstimator,
       )
 
       expect(feeEstimator.estimateFeeRate(PRIORITY_LEVELS[0])).toBe(feeRate)
@@ -192,7 +190,6 @@ describe('FeeEstimator', () => {
       await node.chain.addBlock(block)
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 1,
       })
 
@@ -213,7 +210,6 @@ describe('FeeEstimator', () => {
       const node = nodeTest.node
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 1,
       })
 
@@ -255,6 +251,7 @@ describe('FeeEstimator', () => {
         block,
         transaction2,
         node.chain.consensus.parameters.maxBlockSizeBytes,
+        feeEstimator,
       )
 
       expect(feeEstimator.estimateFeeRate(PRIORITY_LEVELS[0])).toBe(feeRate)
@@ -266,7 +263,6 @@ describe('FeeEstimator', () => {
       const node = nodeTest.node
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 2,
       })
 
@@ -309,7 +305,6 @@ describe('FeeEstimator', () => {
       const node = nodeTest.node
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 2,
       })
 
@@ -344,7 +339,7 @@ describe('FeeEstimator', () => {
       expect(feeEstimator.size(PRIORITY_LEVELS[2])).toBe(2)
 
       // transaction from first block is still in the cache
-      expect(feeEstimator['queues']['low'].at(0)?.blockHash).toEqualHash(block.header.hash)
+      expect(feeEstimator['queues']['slow'].at(0)?.blockHash).toEqualHash(block.header.hash)
     })
   })
 
@@ -353,7 +348,6 @@ describe('FeeEstimator', () => {
       const node = nodeTest.node
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 2,
       })
 
@@ -378,7 +372,6 @@ describe('FeeEstimator', () => {
       const node = nodeTest.node
 
       const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
         maxBlockHistory: 2,
       })
 
@@ -417,59 +410,6 @@ describe('FeeEstimator', () => {
       expect(feeEstimator.size(PRIORITY_LEVELS[0])).toBe(1)
       expect(feeEstimator.size(PRIORITY_LEVELS[1])).toBe(1)
       expect(feeEstimator.size(PRIORITY_LEVELS[2])).toBe(1)
-    })
-  })
-
-  describe('estimateFee', () => {
-    it('should estimate fee for a pending transaction', async () => {
-      const node = nodeTest.node
-
-      const account1 = await useAccountFixture(node.wallet, 'account1')
-      const account2 = await useAccountFixture(node.wallet, 'account2')
-
-      const { block, transaction } = await useBlockWithTx(node, account1, account2, true, {
-        fee: 10,
-      })
-
-      await node.chain.addBlock(block)
-      await node.wallet.updateHead()
-
-      // account1 should have only one note -- change from its transaction to account2
-      const account1Notes = await AsyncUtils.materialize(
-        account1.getUnspentNotes(Asset.nativeId()),
-      )
-      expect(account1Notes.length).toEqual(1)
-
-      const feeEstimator = new FeeEstimator({
-        wallet: node.wallet,
-        maxBlockHistory: 1,
-      })
-      await feeEstimator.init(node.chain)
-
-      const feeRate = getEstimateFeeRate(
-        block,
-        transaction,
-        node.chain.consensus.parameters.maxBlockSizeBytes,
-      )
-
-      const size =
-        8 +
-        8 +
-        8 +
-        4 +
-        64 +
-        2 * NOTE_ENCRYPTED_SERIALIZED_SIZE_IN_BYTE +
-        SPEND_SERIALIZED_SIZE_IN_BYTE
-
-      const fee = await feeEstimator.estimateFee('low', account1, [
-        {
-          publicAddress: account2.publicAddress,
-          amount: BigInt(5),
-          memo: 'test',
-        },
-      ])
-
-      expect(fee).toBe(getFee(feeRate, size))
     })
   })
 })
