@@ -359,14 +359,7 @@ export class StratumServer {
     }
 
     const serialized = JSON.stringify(message) + '\n'
-
-    // this.logger.debug('broadcasting to clients', {
-    //   method,
-    //   id: message.id,
-    //   numClients: this.clients.size,
-    //   messageLength: serialized.length,
-    // })
-
+    
     let broadcasted = 0
 
     for (const client of this.clients.values()) {

@@ -320,9 +320,16 @@ export class MiningPool {
         const hashRate = await this.estimateHashRate()
         const hashedHeaderHex = hashedHeader.toString('hex')
 
-        const minersFee = new Transaction(
-          Buffer.from(blockTemplate.transactions[0], 'hex'),
-        ).fee()
+        let minersFee
+        try {
+          minersFee = new Transaction(
+            Buffer.from(blockTemplate.transactions[0], 'hex'),
+          ).fee()
+        } catch (error) {
+          this.stratum.submitReply(client.socket, false, "Submitted to node exception")
+          this.logger.error(`There was an error with the minersFee: ${ErrorUtils.renderError(error)}`)
+          return
+        }
 
         await this.shares.submitBlock(blockTemplate.header.sequence, hashedHeaderHex, minersFee)
 
@@ -447,7 +454,7 @@ export class MiningPool {
     const existingTarget = BigIntUtils.fromBytesBE(
       Buffer.from(latestBlock.header.target, 'hex'),
     )
-    if (newTarget.asBigInt() === existingTarget && newTime.getTime() - latestBlock.header.timestamp < 14300) {
+    if (newTarget.asBigInt() === existingTarget && newTime.getTime() - latestBlock.header.timestamp < 19300) {
       this.logger.debug(
         `Existing target ${BigIntUtils.writeBigU256BE(newTarget.asBigInt()).toString('hex')}, no need to send out new work.`,
       )
