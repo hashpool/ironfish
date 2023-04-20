@@ -15,7 +15,6 @@ import { IronFlag, RemoteFlags } from '../../flags'
 import { selectAsset } from '../../utils/asset'
 import { promptCurrency } from '../../utils/currency'
 import { selectFee } from '../../utils/fees'
-import { doEligibilityCheck } from '../../utils/testnet'
 import { watchTransaction } from '../../utils/transaction'
 
 export class Mint extends IronfishCommand {
@@ -80,11 +79,6 @@ export class Mint extends IronfishCommand {
       description:
         'The block sequence that the transaction can not be mined after. Set to 0 for no expiration.',
     }),
-    eligibility: Flags.boolean({
-      default: true,
-      allowNo: true,
-      description: 'check testnet eligibility',
-    }),
     offline: Flags.boolean({
       default: false,
       description: 'Allow offline transaction creation',
@@ -99,12 +93,8 @@ export class Mint extends IronfishCommand {
     const { flags } = await this.parse(Mint)
     const client = await this.sdk.connectRpc()
 
-    if (flags.eligibility) {
-      await doEligibilityCheck(client, this.logger)
-    }
-
     if (!flags.offline) {
-      const status = await client.getNodeStatus()
+      const status = await client.node.getStatus()
       if (!status.content.blockchain.synced) {
         this.log(
           `Your node must be synced with the Iron Fish network to send a transaction. Please try again later`,
@@ -115,7 +105,7 @@ export class Mint extends IronfishCommand {
 
     let account = flags.account
     if (!account) {
-      const response = await client.getDefaultAccount()
+      const response = await client.wallet.getDefaultAccount()
 
       if (!response.content.account) {
         this.error(
@@ -160,6 +150,7 @@ export class Mint extends IronfishCommand {
       const asset = await selectAsset(client, account, {
         action: 'mint',
         showNativeAsset: false,
+        showNonOwnerAsset: false,
         showSingleAssetChoice: true,
         confirmations: flags.confirmations,
       })
@@ -178,6 +169,7 @@ export class Mint extends IronfishCommand {
         required: true,
         text: 'Enter the amount',
         minimum: 1n,
+        logger: this.logger,
       })
     }
 
@@ -203,9 +195,10 @@ export class Mint extends IronfishCommand {
       raw = await selectFee({
         client,
         transaction: params,
+        logger: this.logger,
       })
     } else {
-      const response = await client.createTransaction(params)
+      const response = await client.wallet.createTransaction(params)
       const bytes = Buffer.from(response.content.transaction, 'hex')
       raw = RawTransactionSerde.deserialize(bytes)
     }
@@ -226,7 +219,7 @@ export class Mint extends IronfishCommand {
 
     CliUx.ux.action.start('Sending the transaction')
 
-    const response = await client.postTransaction({
+    const response = await client.wallet.postTransaction({
       transaction: RawTransactionSerde.serialize(raw).toString('hex'),
       account,
     })

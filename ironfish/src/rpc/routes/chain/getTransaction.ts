@@ -7,11 +7,12 @@ import { CurrencyUtils } from '../../../utils'
 import { ValidationError } from '../../adapters'
 import { ApiNamespace, router } from '../router'
 
-export type GetTransactionRequest = { blockHash: string; transactionHash: string }
+export type GetTransactionRequest = { transactionHash: string; blockHash?: string }
 
 export type GetTransactionResponse = {
   fee: string
   expiration: number
+  noteSize: number
   notesCount: number
   spendsCount: number
   signature: string
@@ -27,8 +28,8 @@ export type GetTransactionResponse = {
 }
 export const GetTransactionRequestSchema: yup.ObjectSchema<GetTransactionRequest> = yup
   .object({
-    blockHash: yup.string().defined(),
     transactionHash: yup.string().defined(),
+    blockHash: yup.string(),
   })
   .defined()
 
@@ -36,6 +37,7 @@ export const GetTransactionResponseSchema: yup.ObjectSchema<GetTransactionRespon
   .object({
     fee: yup.string().defined(),
     expiration: yup.number().defined(),
+    noteSize: yup.number().defined(),
     notesCount: yup.number().defined(),
     spendsCount: yup.number().defined(),
     signature: yup.string().defined(),
@@ -67,13 +69,24 @@ router.register<typeof GetTransactionRequestSchema, GetTransactionResponse>(
   `${ApiNamespace.chain}/getTransaction`,
   GetTransactionRequestSchema,
   async (request, node): Promise<void> => {
-    if (!request.data.blockHash || !request.data.transactionHash) {
-      throw new ValidationError(`Missing block hash or transaction hash`)
+    if (!request.data.transactionHash) {
+      throw new ValidationError(`Missing transaction hash`)
     }
-    const hashBuffer = BlockHashSerdeInstance.deserialize(request.data.blockHash)
 
-    const block = await node.chain.getBlock(hashBuffer)
-    if (!block) {
+    const hashBuffer = request.data.blockHash
+      ? BlockHashSerdeInstance.deserialize(request.data.blockHash)
+      : await node.chain.getBlockHashByTransactionHash(
+          Buffer.from(request.data.transactionHash, 'hex'),
+        )
+
+    if (!hashBuffer) {
+      throw new ValidationError(
+        `No block hash found for transaction hash ${request.data.transactionHash}`,
+      )
+    }
+
+    const blockHeader = await node.chain.getHeader(hashBuffer)
+    if (!blockHeader) {
       throw new ValidationError(`No block found`)
     }
 
@@ -81,6 +94,7 @@ router.register<typeof GetTransactionRequestSchema, GetTransactionResponse>(
     const rawTransaction: GetTransactionResponse = {
       fee: '0',
       expiration: 0,
+      noteSize: 0,
       notesCount: 0,
       spendsCount: 0,
       signature: '',
@@ -88,8 +102,9 @@ router.register<typeof GetTransactionRequestSchema, GetTransactionResponse>(
       mints: [],
       burns: [],
     }
+    const transactions = await node.chain.getBlockTransactions(blockHeader)
 
-    block.transactions.map((transaction) => {
+    transactions.map(({ transaction, initialNoteIndex }) => {
       if (transaction.hash().toString('hex') === request.data.transactionHash) {
         const fee = transaction.fee().toString()
         const expiration = transaction.expiration()
@@ -102,6 +117,7 @@ router.register<typeof GetTransactionRequestSchema, GetTransactionResponse>(
 
         rawTransaction.fee = fee
         rawTransaction.expiration = expiration
+        rawTransaction.noteSize = initialNoteIndex + transaction.notes.length
         rawTransaction.notesCount = transaction.notes.length
         rawTransaction.spendsCount = transaction.spends.length
         rawTransaction.signature = signature.toString('hex')

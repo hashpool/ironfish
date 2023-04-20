@@ -33,13 +33,13 @@ describe('Syncer', () => {
     expect(startSyncSpy).not.toHaveBeenCalled()
 
     const { peer } = getConnectedPeer(peerNetwork.peerManager)
-    peer.work = BigInt(0)
+    peer.work = 0n
 
     // Peer does not have more work
     syncer.findPeer()
     expect(startSyncSpy).not.toHaveBeenCalled()
 
-    peer.work = chain.head.work + BigInt(1)
+    peer.work = chain.head.work + 1n
 
     // Peer should have more work than us now
     syncer.findPeer()
@@ -50,7 +50,7 @@ describe('Syncer', () => {
     const { peerNetwork, syncer } = nodeTest
 
     const { peer } = getConnectedPeer(peerNetwork.peerManager)
-    peer.work = BigInt(1)
+    peer.work = 1n
     peer.sequence = 1
     peer.head = Buffer.from('')
 
@@ -76,7 +76,7 @@ describe('Syncer', () => {
     const { peerNetwork, syncer } = nodeTest
 
     const { peer } = getConnectedPeer(peerNetwork.peerManager)
-    peer.work = BigInt(1)
+    peer.work = 1n
     peer.sequence = 1
     peer.head = Buffer.from('')
 
@@ -106,7 +106,7 @@ describe('Syncer', () => {
     const { peerNetwork, syncer } = nodeTest
 
     const { peer } = getConnectedPeer(peerNetwork.peerManager)
-    peer.work = BigInt(1)
+    peer.work = 1n
     peer.sequence = 1
     peer.head = Buffer.from('')
 
@@ -156,7 +156,7 @@ describe('Syncer', () => {
     const { peer } = getConnectedPeer(peerNetwork.peerManager)
     peer.sequence = blockA4.header.sequence
     peer.head = blockA4.header.hash
-    peer.work = BigInt(10)
+    peer.work = 10n
 
     const getBlocksSpy = jest
       .spyOn(peerNetwork, 'getBlocks')
@@ -164,21 +164,26 @@ describe('Syncer', () => {
         Promise.resolve({
           blocks: [genesis, blockA1],
           time: 100,
+          isMessageFull: true,
         }),
       )
       .mockImplementationOnce(() =>
         Promise.resolve({
           blocks: [blockA1, blockA2],
           time: 100,
+          isMessageFull: true,
         }),
       )
       .mockImplementationOnce(() =>
         Promise.resolve({
           blocks: [blockA2, blockA3],
           time: 100,
+          isMessageFull: true,
         }),
       )
-      .mockImplementationOnce(() => Promise.resolve({ blocks: [blockA3], time: 100 }))
+      .mockImplementationOnce(() =>
+        Promise.resolve({ blocks: [blockA3], time: 100, isMessageFull: false }),
+      )
 
     syncer.loader = peer
     await syncer.syncBlocks(peer, genesis.header.hash, genesis.header.sequence)
@@ -198,11 +203,13 @@ describe('Syncer', () => {
     const { peer } = getConnectedPeer(peerNetwork.peerManager)
     peer.sequence = 2
     peer.head = Buffer.alloc(32, 1)
-    peer.work = BigInt(10)
+    peer.work = 10n
 
     const getBlocksSpy = jest
       .spyOn(peerNetwork, 'getBlocks')
-      .mockImplementation(() => Promise.resolve({ blocks: [], time: 100 }))
+      .mockImplementation(() =>
+        Promise.resolve({ blocks: [], time: 100, isMessageFull: false }),
+      )
     const peerPunished = jest.spyOn(peer, 'punish')
 
     syncer.loader = peer

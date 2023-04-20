@@ -20,26 +20,30 @@ describe('burnAsset', () => {
   describe('with an invalid fee', () => {
     it('throws a validation error', async () => {
       await expect(
-        routeTest.client.burnAsset({
+        routeTest.client.wallet.burnAsset({
           account: 'account',
           assetId: '{ url: hello }',
           fee: '0',
           value: '100',
         }),
-      ).rejects.toThrow('value must be equal to or greater than 1')
+      ).rejects.toThrow(
+        'Request failed (400) validation: value must be equal to or greater than 1',
+      )
     })
   })
 
   describe('with an invalid value', () => {
     it('throws a validation error', async () => {
       await expect(
-        routeTest.client.burnAsset({
+        routeTest.client.wallet.burnAsset({
           account: 'account',
           assetId: '{ url: hello }',
           fee: '1',
           value: '-1',
         }),
-      ).rejects.toThrow('value must be equal to or greater than 1')
+      ).rejects.toThrow(
+        'Request failed (400) validation: value must be equal to or greater than 1',
+      )
     })
   })
 
@@ -65,7 +69,7 @@ describe('burnAsset', () => {
       })
       jest.spyOn(wallet, 'burn').mockResolvedValueOnce(burnTransaction)
 
-      const response = await routeTest.client.burnAsset({
+      const response = await routeTest.client.wallet.burnAsset({
         account: account.name,
         assetId: assetId.toString('hex'),
         fee: '1',

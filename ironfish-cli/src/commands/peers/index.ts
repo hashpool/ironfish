@@ -45,6 +45,10 @@ export class ListCommand extends IronfishCommand {
       description: 'Display node names',
       hidden: true,
     }),
+    features: Flags.boolean({
+      default: false,
+      description: 'Display features that the peers have enabled',
+    }),
   }
 
   async start(): Promise<void> {
@@ -52,7 +56,7 @@ export class ListCommand extends IronfishCommand {
 
     if (!flags.follow) {
       await this.sdk.client.connect()
-      const response = await this.sdk.client.getPeers()
+      const response = await this.sdk.client.peer.getPeers()
       this.log(renderTable(response.content, flags))
       this.exit(0)
     }
@@ -75,7 +79,7 @@ export class ListCommand extends IronfishCommand {
         continue
       }
 
-      const response = this.sdk.client.getPeersStream()
+      const response = this.sdk.client.peer.getPeersStream()
 
       for await (const value of response.contentStream()) {
         text.clearBaseLine(0)
@@ -125,6 +129,26 @@ function renderTable(
       minWidth: 2,
       get: (row: GetPeerResponsePeer) => {
         return row.sequence || '-'
+      },
+    }
+  }
+
+  if (flags.features) {
+    columns['features'] = {
+      header: 'FEATURES',
+      minWidth: 2,
+      get: (row: GetPeerResponsePeer) => {
+        if (!row.features) {
+          return ''
+        }
+
+        return Object.entries(row.features)
+          .map(([k, v]) => {
+            return v ? k : null
+          })
+          .filter(Boolean)
+          .sort()
+          .join(',')
       },
     }
   }

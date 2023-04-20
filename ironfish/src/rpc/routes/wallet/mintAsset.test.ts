@@ -16,28 +16,32 @@ describe('mint', () => {
   describe('with an invalid fee', () => {
     it('throws a validation error', async () => {
       await expect(
-        routeTest.client.mintAsset({
+        routeTest.client.wallet.mintAsset({
           account: 'account',
           fee: '0',
           metadata: '{ url: hello }',
           name: 'fake-coin',
           value: '100',
         }),
-      ).rejects.toThrow('value must be equal to or greater than 1')
+      ).rejects.toThrow(
+        'Request failed (400) validation: value must be equal to or greater than 1',
+      )
     })
   })
 
   describe('with an invalid value', () => {
     it('throws a validation error', async () => {
       await expect(
-        routeTest.client.mintAsset({
+        routeTest.client.wallet.mintAsset({
           account: 'account',
           fee: '1',
           metadata: '{ url: hello }',
           name: 'fake-coin',
           value: '-1',
         }),
-      ).rejects.toThrow('value must be equal to or greater than 1')
+      ).rejects.toThrow(
+        'Request failed (400) validation: value must be equal to or greater than 1',
+      )
     })
   })
 
@@ -70,7 +74,7 @@ describe('mint', () => {
 
       jest.spyOn(wallet, 'mint').mockResolvedValueOnce(mintTransaction)
 
-      const response = await routeTest.client.mintAsset({
+      const response = await routeTest.client.wallet.mintAsset({
         account: account.name,
         fee: '1',
         metadata: asset.metadata().toString('hex'),

@@ -13,6 +13,8 @@ export const DEFAULT_DISCORD_INVITE = 'https://discord.ironfish.network'
 export const DEFAULT_USE_RPC_IPC = true
 export const DEFAULT_USE_RPC_TCP = false
 export const DEFAULT_USE_RPC_TLS = true
+// TODO(daniel): Setting this to false until we can get HTTPS + basic auth
+export const DEFAULT_USE_RPC_HTTP = false
 export const DEFAULT_POOL_HOST = '::'
 export const DEFAULT_POOL_PORT = 9034
 export const DEFAULT_NETWORK_ID = 0
@@ -20,6 +22,8 @@ export const DEFAULT_FEE_ESTIMATOR_MAX_BLOCK_HISTORY = 10
 export const DEFAULT_FEE_ESTIMATOR_PERCENTILE_SLOW = 10
 export const DEFAULT_FEE_ESTIMATOR_PERCENTILE_AVERAGE = 20
 export const DEFAULT_FEE_ESTIMATOR_PERCENTILE_FAST = 30
+
+const MEGABYTES = 1000 * 1000
 
 export type ConfigOptions = {
   bootstrapNodes: string[]
@@ -31,6 +35,7 @@ export type ConfigOptions = {
   enableRpcIpc: boolean
   enableRpcTcp: boolean
   enableRpcTls: boolean
+  enableRpcHttp: boolean
   enableSyncing: boolean
   enableTelemetry: boolean
   enableMetrics: boolean
@@ -91,6 +96,8 @@ export type ConfigOptions = {
   rpcTcpPort: number
   tlsKeyPath: string
   tlsCertPath: string
+  rpcHttpHost: string
+  rpcHttpPort: number
   /**
    * The maximum number of peers we can be connected to at a time. Past this number,
    * new connections will be rejected.
@@ -141,7 +148,7 @@ export type ConfigOptions = {
   /**
    * The name of the account that the pool will use to payout from.
    */
-  poolAccountName: string
+  poolAccountName?: string
 
   /**
    * Should pool clients be banned for perceived bad behavior
@@ -248,6 +255,18 @@ export type ConfigOptions = {
    */
   maxSyncedAgeBlocks: number
 
+  /**
+   * Limit the number of bytes of transactions stored in the mempool. Does NOT account for the
+   * entire size of the mempool (like indices and caches)
+   */
+  memPoolMaxSizeBytes: number
+
+  /**
+   * Limit how many entries the mempool's recently evicted caches stores. This cache is used to keep
+   * track of transaction hashes recently evicted from the mempool after it exceeds mempoolMaxSizeBytes
+   */
+  memPoolRecentlyEvictedCacheSize: number
+
   networkDefinitionPath: string
 }
 
@@ -262,6 +281,7 @@ export const ConfigOptionsSchema: yup.ObjectSchema<Partial<ConfigOptions>> = yup
     enableRpcIpc: yup.boolean(),
     enableRpcTcp: yup.boolean(),
     enableRpcTls: yup.boolean(),
+    enableRpcHttp: yup.boolean(),
     enableSyncing: yup.boolean(),
     enableTelemetry: yup.boolean(),
     enableMetrics: yup.boolean(),
@@ -284,6 +304,8 @@ export const ConfigOptionsSchema: yup.ObjectSchema<Partial<ConfigOptions>> = yup
     rpcTcpPort: YupUtils.isPort,
     tlsKeyPath: yup.string().trim(),
     tlsCertPath: yup.string().trim(),
+    rpcHttpHost: yup.string().trim(),
+    rpcHttpPort: YupUtils.isPort,
     maxPeers: YupUtils.isPositiveInteger,
     minPeers: YupUtils.isPositiveInteger,
     targetPeers: yup.number().integer().min(1),
@@ -294,7 +316,7 @@ export const ConfigOptionsSchema: yup.ObjectSchema<Partial<ConfigOptions>> = yup
     minerBatchSize: YupUtils.isPositiveInteger,
     confirmations: YupUtils.isPositiveInteger,
     poolName: yup.string(),
-    poolAccountName: yup.string(),
+    poolAccountName: yup.string().optional(),
     poolBanning: yup.boolean(),
     poolHost: yup.string().trim(),
     poolPort: YupUtils.isPort,
@@ -315,6 +337,11 @@ export const ConfigOptionsSchema: yup.ObjectSchema<Partial<ConfigOptions>> = yup
     networkId: yup.number().integer().min(0),
     customNetwork: yup.string().trim(),
     maxSyncedAgeBlocks: yup.number().integer().min(0),
+    mempoolMaxSizeBytes: yup
+      .number()
+      .integer()
+      .min(20 * MEGABYTES),
+    memPoolRecentlyEvictedCacheSize: yup.number().integer(),
     networkDefinitionPath: yup.string().trim(),
   })
   .defined()
@@ -350,10 +377,11 @@ export class Config extends KeyStore<ConfigOptions> {
       enableRpcIpc: DEFAULT_USE_RPC_IPC,
       enableRpcTcp: DEFAULT_USE_RPC_TCP,
       enableRpcTls: DEFAULT_USE_RPC_TLS,
+      enableRpcHttp: DEFAULT_USE_RPC_HTTP,
       enableSyncing: true,
       enableTelemetry: false,
       enableMetrics: true,
-      getFundsApi: 'https://api.ironfish.network/faucet_transactions',
+      getFundsApi: 'https://testnet.api.ironfish.network/faucet_transactions',
       ipcPath: files.resolve(files.join(dataDir, 'ironfish.ipc')),
       logLevel: '*:info',
       logPeerMessages: false,
@@ -369,16 +397,18 @@ export class Config extends KeyStore<ConfigOptions> {
       rpcTcpPort: 8020,
       tlsKeyPath: files.resolve(files.join(dataDir, 'certs', 'node-key.pem')),
       tlsCertPath: files.resolve(files.join(dataDir, 'certs', 'node-cert.pem')),
+      rpcHttpHost: 'localhost',
+      rpcHttpPort: 8021,
       maxPeers: 50,
       confirmations: 2,
       minPeers: 1,
       targetPeers: 50,
       telemetryApi: 'https://api.ironfish.network/telemetry',
       generateNewIdentity: false,
-      blocksPerMessage: 5,
+      blocksPerMessage: 25,
       minerBatchSize: 25000,
       poolName: 'Iron Fish Pool',
-      poolAccountName: 'default',
+      poolAccountName: undefined,
       poolBanning: true,
       poolHost: DEFAULT_POOL_HOST,
       poolPort: DEFAULT_POOL_PORT,
@@ -399,6 +429,8 @@ export class Config extends KeyStore<ConfigOptions> {
       networkId: DEFAULT_NETWORK_ID,
       customNetwork: '',
       maxSyncedAgeBlocks: 60,
+      memPoolMaxSizeBytes: 60 * MEGABYTES,
+      memPoolRecentlyEvictedCacheSize: 60000,
       networkDefinitionPath: files.resolve(files.join(dataDir, 'network.json')),
     }
   }

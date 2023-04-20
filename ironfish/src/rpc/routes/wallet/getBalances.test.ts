@@ -15,7 +15,7 @@ describe('getBalances', () => {
   describe('with a missing account', () => {
     it('throws a validation error', async () => {
       await expect(
-        routeTest.client.getAccountBalances({ account: 'fake-account' }),
+        routeTest.client.wallet.getAccountBalances({ account: 'fake-account' }),
       ).rejects.toThrow('No account with name fake-account')
     })
   })
@@ -32,6 +32,7 @@ describe('getBalances', () => {
         {
           assetId,
           assetName: asset.name(),
+          assetOwner: asset.owner(),
           confirmed: BigInt(8),
           unconfirmed: BigInt(8),
           pending: BigInt(8),
@@ -44,6 +45,7 @@ describe('getBalances', () => {
         {
           assetId: Asset.nativeId(),
           assetName: Buffer.from('$IRON', 'utf8'),
+          assetOwner: Buffer.from('Iron Fish', 'utf8'),
           confirmed: BigInt(2000000000),
           unconfirmed: BigInt(2000000000),
           pending: BigInt(2000000000),
@@ -69,6 +71,7 @@ describe('getBalances', () => {
           id: asset.id(),
           metadata: asset.metadata(),
           name: asset.name(),
+          nonce: asset.nonce(),
           owner: asset.owner(),
           createdTransactionHash: Buffer.alloc(32),
           blockHash: Buffer.alloc(32),
@@ -77,7 +80,7 @@ describe('getBalances', () => {
         }),
       )
 
-      const response = await routeTest.client.getAccountBalances({
+      const response = await routeTest.client.wallet.getAccountBalances({
         account: account.name,
       })
 
@@ -87,6 +90,7 @@ describe('getBalances', () => {
           ...mockBalance,
           assetId: mockBalance.assetId.toString('hex'),
           assetName: mockBalance.assetName.toString('hex'),
+          assetOwner: mockBalance.assetOwner.toString('hex'),
           confirmed: mockBalance.confirmed.toString(),
           unconfirmed: mockBalance.unconfirmed.toString(),
           pending: mockBalance.pending.toString(),

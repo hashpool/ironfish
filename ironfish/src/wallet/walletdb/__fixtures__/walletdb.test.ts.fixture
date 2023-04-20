@@ -1,54 +1,54 @@
 {
   "WalletDB loadNoteHashesInSequenceRange loads note hashes in the provided range": [
     {
-      "version": 1,
-      "id": "190b2ec8-68be-48ce-91cd-ef2e2c860444",
+      "version": 2,
+      "id": "a7600b14-e5a2-45a9-b017-090aec98d669",
       "name": "test",
-      "spendingKey": "2276422b10e2fc6d8d0103be20908d67f51d8d590464f18e1f28b66737bb6511",
-      "viewKey": "fd276814d55ed2f1b91080a1b838f1d4fe5d66c23a15eb85d150a6a7843ece85a99b3b4789f46d6a89c32b6f52bb6bad5f7a44d084c17568dd0f3e0e7f07a1d8",
-      "incomingViewKey": "0f74ec16e865595be96255dc31a387cc76997bfa968a994e9770ebfbc7360e04",
-      "outgoingViewKey": "8165c1b1b0d93b99b504dad16d7f14f53dd8e445b901a6d3e3870c857649298c",
-      "publicAddress": "412dbf45f120fcd0acb69299ad0467e4aa30a2758ea0bfb3457ceb7b9f774e66",
-      "default": false
+      "spendingKey": "a919c4c64153673b3fd76af5478a70ce88498f65a31f94c8553abcfd6797db1f",
+      "viewKey": "880ef945f43e36387873b657de3fb80f9f77343fd3430f076243e4a26913e1c93e27b90d26f1ff196fecb945421c36bccb5e3b06850dac11c6a797dd83741b28",
+      "incomingViewKey": "68e90bf6c4a9a59980f64068644bcfd61e6a39032d0dbbfb367370fa37cc8a02",
+      "outgoingViewKey": "d81e63753b71142b59e1df78a1cfe73c34b1798f399b616f57568a0aa34a19b5",
+      "publicAddress": "017d73ec21e1002ee338286aa196747b3d81a26b534f7c51fc13f70cc747f3a9",
+      "createdAt": null
     }
   ],
   "WalletDB loadTransactionHashesInSequenceRange loads transaction hashes in the provided range": [
     {
-      "version": 1,
-      "id": "9398ca43-70d2-4b82-89be-4e130c261a4c",
+      "version": 2,
+      "id": "4b5d1006-4f9b-4d8f-9b1e-38293a249e8a",
       "name": "test",
-      "spendingKey": "891420ef6136ff4f757e23b61f9cecbf99e78827ad040244a5fdb92f1d6f22c7",
-      "viewKey": "297f80e2fb9333bf5ce6fb2ffa1e6b5f45d7b693d4e640d358ac19ea61123064297e0b11bfaea93cc2bf0d98d5790799b2b45842d469da3cee2521fefb39ebd6",
-      "incomingViewKey": "a28c9c28d3a7c22aee2482fc082baaa5a94fe18b05c030842d4c800d4e91ca00",
-      "outgoingViewKey": "677581d29b61babcfe5191c938e5056ed5eb3a16fbd35ae47a7c9ccebca9e3af",
-      "publicAddress": "442aed8b02ead02b1d0033b9e2c5604e3d53440835dd12fcd6a51a393e6a5357",
-      "default": false
+      "spendingKey": "a383d8e0af769ab465eaf4bcebab266405b47b6d8f845afbb23385cf49a6a859",
+      "viewKey": "d6fb3df2e63558d229540494b9943efb5895baeba3966c6bad9b3eb7024a549f0c1186d669005bb549d9f80248f7dbec95349a9938b0292e1fc43a8c1af899c6",
+      "incomingViewKey": "704a8d4927d14344790c004b144c039b6094ccfb1391428efaa6df1003553901",
+      "outgoingViewKey": "f8961bcbfde1e42074b4954f6190d2e0c1428407f18b264a6f95d8fa33ba40ff",
+      "publicAddress": "29ad362c8b74a1ce09df078f2d25394eb48b7135317b53fdd657483cf8df7b9c",
+      "createdAt": null
     }
   ],
   "WalletDB loadExpiredTransactionHashes loads transaction hashes with expiration sequences in the expired range": [
     {
-      "version": 1,
-      "id": "b4334e55-62ab-4bb0-b028-52c6a239b590",
+      "version": 2,
+      "id": "d1ce4649-d102-4067-9979-9c4327809715",
       "name": "test",
-      "spendingKey": "114f4006599b5094daa2ad70b4fbd560ff5eeb6a9a310680115f60e8f126dbb8",
-      "viewKey": "ab35e51bc73dd6b55504905761c91b94680f0ee59befa9b048155aebf2ab6a5cb01cc3acb8361a5219c8ebf65a7a9443fa6787d4968e73354b8995aa608b0994",
-      "incomingViewKey": "3029800618faf4773cb29fd927537b2bf576bc82f80850a610ae8fc6b533fc01",
-      "outgoingViewKey": "6da322582e94da5ca899fb201a466eaf3d78535aeed9979bb29da3cdd5048c69",
-      "publicAddress": "40ad2b8069393ecb2240b2bcb7e7da2fdbc53532c866861efa845ecf4a596bc8",
-      "default": false
+      "spendingKey": "2b11076ff19357f5cc66c3455d5bf1dafd00a1fd05d79097c566f55d427c3aaa",
+      "viewKey": "162d5040839db817859187c6237c2754772fac700fbc7b85bb3c1e3d53de62bd212f111fee131921046792334017691db0354ec89c131732cf659296d695bfbc",
+      "incomingViewKey": "df49091dd809bfe246aa5a0b1eedaea31b1ae816fc2aa98d7ec9c5f017037102",
+      "outgoingViewKey": "0b4e325f43707d467579c98356f2064750139f40fe5e7a0ffd37db68b8e7ab8b",
+      "publicAddress": "175d7f75895b6466c39501a6ce41898e1f90e4f4546bc5f123e8cfaa0c111f34",
+      "createdAt": null
     }
   ],
   "WalletDB loadPendingTransactionHashes loads transaction hashes with expiration sequences outside the expired range": [
     {
-      "version": 1,
-      "id": "e1df1660-0014-4689-ad39-6f6ef21e7142",
+      "version": 2,
+      "id": "da5523e8-3a62-47e6-a667-cafd810b0fe8",
       "name": "test",
-      "spendingKey": "fea4cfaae6fd2e2e8f377fe9a003d0c2ced646f6fe8fa271476cef8e6f1dad85",
-      "viewKey": "dc1b6fad517f7914ddb5592d5f77502acd31b3f8580be624da217052afa05782cb988ba982b84905f824bc4daf295b08c7f8d51a7603a74b1b5c779efa85a855",
-      "incomingViewKey": "d6479406a255728e063933ca20e39ca4f11329b858e165255333fdf87dac5d04",
-      "outgoingViewKey": "f2b723568306e3d5f42129fa656af08736e5bad9f747359269c566d428d446f8",
-      "publicAddress": "c2f98450a9a3cae438352b7a6b7ceb7c8bb4918baf62b6016984dd1a15e083eb",
-      "default": false
+      "spendingKey": "753eafe9a680eb80fc0286a747c1456ef0bbf6fadea3a20eec16b55fec754e37",
+      "viewKey": "a637cd4dde2b5b3017cf1b55ea6623430064198d223a585f8e73dcdecad66ab5fe9b091b23ca407788ffb1310ba73f15efdbf371b379f97a431a868288522280",
+      "incomingViewKey": "8ec1957330f8e233377dced8ca8c5f1674cef27baa5414ef9c040c471874d300",
+      "outgoingViewKey": "6fb3c8d704264d9a401a9f486debf0b245e07aaac1dc018aa9979c3f9cb97181",
+      "publicAddress": "541f9aacd5657acff39eb5a933f77f72651bf5b54af1b5256fe925baf19c7de3",
+      "createdAt": null
     }
   ]
 }

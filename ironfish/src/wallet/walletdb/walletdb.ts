@@ -9,7 +9,7 @@ import { FileSystem } from '../../fileSystems'
 import { GENESIS_BLOCK_PREVIOUS } from '../../primitives/block'
 import { NoteEncryptedHash } from '../../primitives/noteEncrypted'
 import { Nullifier } from '../../primitives/nullifier'
-import { TransactionHash } from '../../primitives/transaction'
+import { Transaction, TransactionHash } from '../../primitives/transaction'
 import {
   BigU64BEEncoding,
   BUFFER_ENCODING,
@@ -23,11 +23,7 @@ import {
   U32_ENCODING_BE,
   U64_ENCODING,
 } from '../../storage'
-import {
-  getPrefixesKeyRange,
-  getPrefixKeyRange,
-  StorageUtils,
-} from '../../storage/database/utils'
+import { getPrefixesKeyRange, StorageUtils } from '../../storage/database/utils'
 import { createDB } from '../../storage/utils'
 import { WorkerPool } from '../../workerPool'
 import { Account, calculateAccountPrefix } from '../account'
@@ -39,7 +35,7 @@ import { HeadValue, NullableHeadValueEncoding } from './headValue'
 import { AccountsDBMeta, MetaValue, MetaValueEncoding } from './metaValue'
 import { TransactionValue, TransactionValueEncoding } from './transactionValue'
 
-const VERSION_DATABASE_ACCOUNTS = 24
+const VERSION_DATABASE_ACCOUNTS = 27
 
 const getAccountsDBMetaDefaults = (): AccountsDBMeta => ({
   defaultAccountId: null,
@@ -109,13 +105,18 @@ export class WalletDB {
   }>
 
   timestampToTransactionHash: IDatabaseStore<{
-    key: [Account['prefix'], number]
-    value: TransactionHash
+    key: [Account['prefix'], [number, TransactionHash]]
+    value: null
   }>
 
   assets: IDatabaseStore<{
     key: [Account['prefix'], Buffer]
     value: AssetValue
+  }>
+
+  nullifierToTransactionHash: IDatabaseStore<{
+    key: [Account['prefix'], Buffer]
+    value: TransactionHash
   }>
 
   unspentNoteHashes: IDatabaseStore<{
@@ -225,15 +226,25 @@ export class WalletDB {
     })
 
     this.timestampToTransactionHash = this.db.addStore({
-      name: 'T',
-      keyEncoding: new PrefixEncoding(new BufferEncoding(), U64_ENCODING, 4),
-      valueEncoding: new BufferEncoding(),
+      name: 'TT',
+      keyEncoding: new PrefixEncoding(
+        new BufferEncoding(),
+        new PrefixEncoding(U64_ENCODING, new BufferEncoding(), 8),
+        4,
+      ),
+      valueEncoding: NULL_ENCODING,
     })
 
     this.assets = this.db.addStore({
       name: 'as',
       keyEncoding: new PrefixEncoding(new BufferEncoding(), new BufferEncoding(), 4),
       valueEncoding: new AssetValueEncoding(),
+    })
+
+    this.nullifierToTransactionHash = this.db.addStore({
+      name: 'nt',
+      keyEncoding: new PrefixEncoding(new BufferEncoding(), new BufferEncoding(), 4),
+      valueEncoding: new BufferEncoding(),
     })
 
     this.unspentNoteHashes = this.db.addStore({
@@ -282,7 +293,7 @@ export class WalletDB {
           account,
           Asset.nativeId(),
           {
-            unconfirmed: BigInt(0),
+            unconfirmed: 0n,
             blockHash: null,
             sequence: null,
           },
@@ -383,8 +394,8 @@ export class WalletDB {
 
       await this.transactions.put([account.prefix, transactionHash], transactionValue, tx)
       await this.timestampToTransactionHash.put(
-        [account.prefix, transactionValue.timestamp.getTime()],
-        transactionHash,
+        [account.prefix, [transactionValue.timestamp.getTime(), transactionHash]],
+        null,
         tx,
       )
     })
@@ -399,7 +410,7 @@ export class WalletDB {
     Assert.isNotUndefined(transaction)
 
     await this.timestampToTransactionHash.del(
-      [account.prefix, transaction.timestamp.getTime()],
+      [account.prefix, [transaction.timestamp.getTime(), transactionHash]],
       tx,
     )
     await this.transactions.del([account.prefix, transactionHash], tx)
@@ -576,15 +587,43 @@ export class WalletDB {
 
   async *loadUnspentNoteHashes(
     account: Account,
+    assetId: Buffer,
+    sequence?: number,
     tx?: IDatabaseTransaction,
   ): AsyncGenerator<Buffer> {
-    const range = getPrefixKeyRange(account.prefix)
+    const encoding = new PrefixEncoding(
+      BUFFER_ENCODING,
+      new PrefixEncoding(BUFFER_ENCODING, U32_ENCODING_BE, 32),
+      4,
+    )
 
-    for await (const [, [, [, [, noteHash]]]] of this.unspentNoteHashes.getAllKeysIter(
+    const maxConfirmedSequence = sequence ?? 2 ** 32 - 1
+
+    const range = getPrefixesKeyRange(
+      encoding.serialize([account.prefix, [assetId, 1]]),
+      encoding.serialize([account.prefix, [assetId, maxConfirmedSequence]]),
+    )
+
+    for await (const [, [, [, [_, noteHash]]]] of this.unspentNoteHashes.getAllKeysIter(
       tx,
       range,
     )) {
       yield noteHash
+    }
+  }
+
+  async *loadUnspentNotes(
+    account: Account,
+    assetId: Buffer,
+    sequence?: number,
+    tx?: IDatabaseTransaction,
+  ): AsyncGenerator<DecryptedNoteValue> {
+    for await (const noteHash of this.loadUnspentNoteHashes(account, assetId, sequence, tx)) {
+      const decryptedNote = await this.decryptedNotes.get([account.prefix, noteHash], tx)
+
+      if (decryptedNote !== undefined) {
+        yield decryptedNote
+      }
     }
   }
 
@@ -844,7 +883,7 @@ export class WalletDB {
 
     return (
       unconfirmedBalance ?? {
-        unconfirmed: BigInt(0),
+        unconfirmed: 0n,
         blockHash: null,
         sequence: null,
       }
@@ -1012,9 +1051,11 @@ export class WalletDB {
     await this.pendingTransactionHashes.clear(tx, account.prefixRange)
   }
 
-  async cleanupDeletedAccounts(signal?: AbortSignal): Promise<void> {
-    let recordsToCleanup = 1000
+  async forceCleanupDeletedAccounts(signal?: AbortSignal): Promise<void> {
+    return this.cleanupDeletedAccounts(Number.POSITIVE_INFINITY, signal)
+  }
 
+  async cleanupDeletedAccounts(recordsToCleanup: number, signal?: AbortSignal): Promise<void> {
     const stores: IDatabaseStore<{
       key: Readonly<unknown>
       value: unknown
@@ -1051,10 +1092,13 @@ export class WalletDB {
     account: Account,
     tx?: IDatabaseTransaction,
   ): AsyncGenerator<TransactionValue> {
-    for await (const transactionHash of this.timestampToTransactionHash.getAllValuesIter(
+    for await (const [, [, transactionHash]] of this.timestampToTransactionHash.getAllKeysIter(
       tx,
       account.prefixRange,
-      { ordered: true, reverse: true },
+      {
+        ordered: true,
+        reverse: true,
+      },
     )) {
       const transaction = await this.loadTransaction(account, transactionHash, tx)
       Assert.isNotUndefined(transaction)
@@ -1083,6 +1127,7 @@ export class WalletDB {
         id: Asset.nativeId(),
         metadata: Buffer.from('Native asset of Iron Fish blockchain', 'utf8'),
         name: Buffer.from('$IRON', 'utf8'),
+        nonce: 0,
         owner: Buffer.from('Iron Fish', 'utf8'),
         blockHash: null,
         sequence: null,
@@ -1106,5 +1151,34 @@ export class WalletDB {
     tx?: IDatabaseTransaction,
   ): Promise<void> {
     await this.assets.del([account.prefix, assetId], tx)
+  }
+
+  async getTransactionHashFromNullifier(
+    account: Account,
+    nullifier: Buffer,
+    tx?: IDatabaseTransaction,
+  ): Promise<Buffer | undefined> {
+    return this.nullifierToTransactionHash.get([account.prefix, nullifier], tx)
+  }
+
+  async saveNullifierToTransactionHash(
+    account: Account,
+    nullifier: Buffer,
+    transaction: Transaction,
+    tx?: IDatabaseTransaction,
+  ): Promise<void> {
+    await this.nullifierToTransactionHash.put(
+      [account.prefix, nullifier],
+      transaction.hash(),
+      tx,
+    )
+  }
+
+  async deleteNullifierToTransactionHash(
+    account: Account,
+    nullifier: Buffer,
+    tx?: IDatabaseTransaction,
+  ): Promise<void> {
+    await this.nullifierToTransactionHash.del([account.prefix, nullifier], tx)
   }
 }

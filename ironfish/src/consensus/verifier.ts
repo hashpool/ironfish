@@ -113,10 +113,18 @@ export class Verifier {
     }
 
     // Sum the total transaction fees
-    let totalTransactionFees = BigInt(0)
+    let totalTransactionFees = 0n
     for (const transaction of otherTransactions) {
-      if (transaction.fee() < 0) {
+      const transactionFee = transaction.fee()
+      if (transactionFee < 0) {
         return { valid: false, reason: VerificationResultReason.INVALID_TRANSACTION_FEE }
+      }
+
+      if (transactionFee < this.chain.consensus.parameters.minFee) {
+        return {
+          valid: false,
+          reason: VerificationResultReason.MINIMUM_FEE_NOT_MET,
+        }
       }
 
       totalTransactionFees += transaction.fee()
@@ -125,10 +133,7 @@ export class Verifier {
     // minersFee should be (negative) miningReward + totalTransactionFees
     const miningReward = this.chain.strategy.miningReward(block.header.sequence)
 
-    if (
-      minersFeeTransaction.fee() !==
-      BigInt(-1) * (BigInt(miningReward) + totalTransactionFees)
-    ) {
+    if (minersFeeTransaction.fee() !== -1n * (BigInt(miningReward) + totalTransactionFees)) {
       return { valid: false, reason: VerificationResultReason.INVALID_MINERS_FEE }
     }
 
@@ -262,6 +267,16 @@ export class Verifier {
       this.chain.consensus.parameters.maxBlockSizeBytes - getBlockWithMinersFeeSize()
     ) {
       return { valid: false, reason: VerificationResultReason.MAX_TRANSACTION_SIZE_EXCEEDED }
+    }
+
+    if (
+      !transaction.isMinersFee() &&
+      transaction.fee() < this.chain.consensus.parameters.minFee
+    ) {
+      return {
+        valid: false,
+        reason: VerificationResultReason.MINIMUM_FEE_NOT_MET,
+      }
     }
 
     const mintVerify = this.verifyMints(transaction.mints)
@@ -504,6 +519,7 @@ export enum VerificationResultReason {
   MAX_BLOCK_SIZE_EXCEEDED = 'Block size exceeds maximum',
   MAX_TRANSACTION_SIZE_EXCEEDED = 'Transaction size exceeds maximum',
   MINERS_FEE_EXPECTED = 'Miners fee expected',
+  MINIMUM_FEE_NOT_MET = 'Transaction fee is below the minimum required fee',
   NATIVE_BURN = 'Attempting to burn the native asset',
   NOTE_COMMITMENT = 'Note_commitment',
   NOTE_COMMITMENT_SIZE_TOO_LARGE = 'Note commitment tree is smaller than referenced by the spend',

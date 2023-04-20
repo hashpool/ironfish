@@ -11,12 +11,15 @@ import {
   DeleteObjectCommand,
   DeleteObjectCommandOutput,
   GetObjectCommand,
+  HeadObjectCommand,
+  HeadObjectCommandOutput,
   ListObjectsCommand,
   ListObjectsCommandInput,
   PutObjectCommand,
   S3Client,
   UploadPartCommand,
 } from '@aws-sdk/client-s3'
+import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { Credentials } from '@aws-sdk/types/dist-types/credentials'
 import { Assert, ErrorUtils, Logger } from '@ironfish/sdk'
@@ -41,6 +44,14 @@ class UploadMultipartError extends UploadToBucketError {}
 class UploadLastMultipartError extends UploadToBucketError {}
 class UploadReadFileError extends UploadToBucketError {}
 class UploadFailedError extends UploadToBucketError {}
+
+const R2_SECRET_NAME = 'r2-prod-access-key'
+const R2_ENDPOINT = `https://a93bebf26da4c2fe205f71c896afcf89.r2.cloudflarestorage.com`
+
+export type R2Secret = {
+  r2AccessKeyId: string
+  r2SecretAccessKey: string
+}
 
 export async function uploadToBucket(
   s3: S3Client,
@@ -254,6 +265,16 @@ export function getDownloadUrl(
   return `https://${bucket}.${regionString}.amazonaws.com/${key}`
 }
 
+export async function getObjectMetadata(
+  s3: S3Client,
+  bucket: string,
+  key: string,
+): Promise<HeadObjectCommandOutput> {
+  const command = new HeadObjectCommand({ Bucket: bucket, Key: key })
+  const response = await s3.send(command)
+  return response
+}
+
 export async function getBucketObjects(s3: S3Client, bucket: string): Promise<string[]> {
   let truncated = true
   let commandParams: ListObjectsCommandInput = { Bucket: bucket }
@@ -307,6 +328,31 @@ export function getS3Client(
     useDualstackEndpoint,
     region,
   })
+}
+
+export function getR2S3Client(credentials: {
+  r2AccessKeyId: string
+  r2SecretAccessKey: string
+}): S3Client {
+  return new S3Client({
+    region: 'auto',
+    endpoint: R2_ENDPOINT,
+    credentials: {
+      accessKeyId: credentials.r2AccessKeyId,
+      secretAccessKey: credentials.r2SecretAccessKey,
+    },
+  })
+}
+
+export async function getR2Credentials(region?: string): Promise<R2Secret | undefined> {
+  const client = new SecretsManagerClient({ region })
+  const command = new GetSecretValueCommand({ SecretId: R2_SECRET_NAME })
+  const response = await client.send(command)
+  if (response.SecretString === undefined) {
+    return
+  } else {
+    return JSON.parse(response.SecretString) as R2Secret
+  }
 }
 
 export async function getCognitoIdentityCredentials(): Promise<Credentials> {

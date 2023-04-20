@@ -15,7 +15,6 @@ import { IronFlag, RemoteFlags } from '../../flags'
 import { selectAsset } from '../../utils/asset'
 import { promptCurrency } from '../../utils/currency'
 import { selectFee } from '../../utils/fees'
-import { doEligibilityCheck } from '../../utils/testnet'
 import { watchTransaction } from '../../utils/transaction'
 
 export class Burn extends IronfishCommand {
@@ -68,11 +67,6 @@ export class Burn extends IronfishCommand {
       description:
         'The block sequence that the transaction can not be mined after. Set to 0 for no expiration.',
     }),
-    eligibility: Flags.boolean({
-      default: true,
-      allowNo: true,
-      description: 'check testnet eligibility',
-    }),
     offline: Flags.boolean({
       default: false,
       description: 'Allow offline transaction creation',
@@ -87,12 +81,8 @@ export class Burn extends IronfishCommand {
     const { flags } = await this.parse(Burn)
     const client = await this.sdk.connectRpc()
 
-    if (flags.eligibility) {
-      await doEligibilityCheck(client, this.logger)
-    }
-
     if (!flags.offline) {
-      const status = await client.getNodeStatus()
+      const status = await client.node.getStatus()
       if (!status.content.blockchain.synced) {
         this.log(
           `Your node must be synced with the Iron Fish network to send a transaction. Please try again later`,
@@ -103,7 +93,7 @@ export class Burn extends IronfishCommand {
 
     let account = flags.account
     if (!account) {
-      const response = await client.getDefaultAccount()
+      const response = await client.wallet.getDefaultAccount()
 
       if (!response.content.account) {
         this.error(
@@ -121,6 +111,7 @@ export class Burn extends IronfishCommand {
       const asset = await selectAsset(client, account, {
         action: 'burn',
         showNativeAsset: false,
+        showNonOwnerAsset: true,
         showSingleAssetChoice: true,
         confirmations: flags.confirmations,
       })
@@ -139,6 +130,7 @@ export class Burn extends IronfishCommand {
         required: true,
         text: 'Enter the amount of the custom asset to burn',
         minimum: 1n,
+        logger: this.logger,
         balance: {
           account,
           confirmations: flags.confirmations,
@@ -166,9 +158,10 @@ export class Burn extends IronfishCommand {
       raw = await selectFee({
         client,
         transaction: params,
+        logger: this.logger,
       })
     } else {
-      const response = await client.createTransaction(params)
+      const response = await client.wallet.createTransaction(params)
       const bytes = Buffer.from(response.content.transaction, 'hex')
       raw = RawTransactionSerde.deserialize(bytes)
     }
@@ -186,7 +179,7 @@ export class Burn extends IronfishCommand {
 
     CliUx.ux.action.start('Sending the transaction')
 
-    const response = await client.postTransaction({
+    const response = await client.wallet.postTransaction({
       transaction: RawTransactionSerde.serialize(raw).toString('hex'),
       account,
     })
@@ -196,7 +189,7 @@ export class Burn extends IronfishCommand {
 
     CliUx.ux.action.stop()
 
-    const assetResponse = await client.getAsset({ id: assetId })
+    const assetResponse = await client.chain.getAsset({ id: assetId })
     const assetName = BufferUtils.toHuman(Buffer.from(assetResponse.content.name, 'hex'))
 
     this.log(`Burned asset ${assetName} from ${account}`)
