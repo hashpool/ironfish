@@ -294,9 +294,15 @@ export class MiningPool {
 
     let graffitiBytes = client.graffiti
     if (graffiti) {
-      this.logger.debug(`Submit graffiti is ${graffiti}`)
-      Assert.isTrue(StringUtils.getByteLength(graffiti) <= GRAFFITI_SIZE)
-      graffitiBytes = GraffitiUtils.fromString(graffiti)
+      let graffiti_len = StringUtils.getByteLength(graffiti)
+      this.logger.debug(`Submit graffiti is ${graffiti}, len is ${graffiti_len}`)
+      Assert.isTrue(graffiti_len <= GRAFFITI_SIZE || graffiti_len == 64)
+      if (graffiti_len == 64) {
+        graffitiBytes = Buffer.from(graffiti, 'hex')
+      } else {
+        graffitiBytes = GraffitiUtils.fromString(graffiti)
+      }
+      
     }
     this.logger.debug(`Graffiti hex is ${graffitiBytes.toString('hex')}`)
 
